@@ -1,0 +1,11 @@
+.env
+credentials/*
+!credentials/.gitkeep
+properties/
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+venv/
+*.egg-info/
+.streamlit/secrets.toml

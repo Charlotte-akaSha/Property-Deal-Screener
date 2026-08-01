@@ -1,0 +1,27 @@
+https://example.com/listings/sample-100-oak-street
+
+100 Oak Street
+Greenwood Lake, NY 10925
+
+Price: $425,000
+Bedrooms: 3
+Bathrooms: 2
+House size: 1,450 sqft
+Lot size: 0.28 acres
+Year built: 1988
+Taxes: $8,200 / year
+HOA: None
+
+Heating: Oil forced air
+Cooling: Central air
+Water: Well
+Sewer: Septic
+Garage: 1-car attached
+Basement: Full unfinished
+
+Description:
+Charming 3-bedroom colonial within commuting distance of NYC. Updated kitchen with
+granite counters, hardwood floors on the main level, and a fenced backyard. Quiet
+residential street with low traffic. Roof replaced in 2019. No known flood zone issues
+disclosed. Strong rental demand in the area for long-term tenants. Property appears
+move-in ready with only light cosmetic updates needed.

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "categories",
+    "recommendation",
+    "strengths",
+    "weaknesses",
+    "red_flags",
+    "questions_to_ask",
+    "rationale"
+  ],
+  "properties": {
+    "categories": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "financial",
+        "location",
+        "property",
+        "appreciation",
+        "rental",
+        "management",
+        "lifestyle",
+        "climate",
+        "risk"
+      ],
+      "properties": {
+        "financial": { "type": "number", "minimum": 0, "maximum": 10 },
+        "location": { "type": "number", "minimum": 0, "maximum": 10 },
+        "property": { "type": "number", "minimum": 0, "maximum": 10 },
+        "appreciation": { "type": "number", "minimum": 0, "maximum": 10 },
+        "rental": { "type": "number", "minimum": 0, "maximum": 10 },
+        "management": { "type": "number", "minimum": 0, "maximum": 10 },
+        "lifestyle": { "type": "number", "minimum": 0, "maximum": 10 },
+        "climate": { "type": "number", "minimum": 0, "maximum": 10 },
+        "risk": { "type": "number", "minimum": 0, "maximum": 10 }
+      }
+    },
+    "recommendation": {
+      "type": "string",
+      "enum": ["Reject", "Save", "Worth visiting"]
+    },
+    "strengths": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "weaknesses": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "red_flags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "questions_to_ask": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "rationale": { "type": "string" }
+  }
+}
