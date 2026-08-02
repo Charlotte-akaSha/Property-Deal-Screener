@@ -14,7 +14,9 @@ if str(SCRIPTS) not in sys.path:
 
 from analyze_property import analyze_from_memory  # noqa: E402
 from utils import MAX_PHOTOS  # noqa: E402
-from write_to_sheets import sheet_url  # noqa: E402
+from write_to_sheets import list_regions, sheet_url  # noqa: E402
+
+regions = list_regions()
 
 st.set_page_config(page_title="AI Real Estate Assistant", layout="centered")
 st.title("AI Real Estate Acquisition Assistant")
@@ -35,6 +37,11 @@ with st.form("analyze_form"):
     property_label = st.text_input(
         "Property label override (optional)",
         help="If set, used as Property ID instead of the address-derived slug.",
+    )
+    region = st.selectbox(
+        "Region (Google Sheet tab)",
+        options=regions,
+        help="Each region is a separate tab in your spreadsheet with the same columns.",
     )
     skip_sheets = st.checkbox("Skip Google Sheets write", value=False)
     submitted = st.form_submit_button("Analyze", type="primary")
@@ -59,6 +66,7 @@ if submitted:
                 link=listing_url.strip(),
                 property_label=property_label.strip() or None,
                 image_uploads=uploads or None,
+                sheet_tab=region if not skip_sheets else None,
                 skip_sheets=skip_sheets,
             )
         except Exception as exc:  # noqa: BLE001
@@ -81,7 +89,8 @@ if submitted:
             f"Retry with: `python scripts/write_to_sheets.py {result['folder']}`"
         )
     elif result.get("sheets"):
-        st.info(f"Google Sheets {result['sheets']['action']} OK.")
+        tab = result["sheets"].get("sheet_tab", region)
+        st.info(f"Google Sheets {result['sheets']['action']} OK on tab **{tab}**.")
         st.link_button("Open in Google Sheets", result["sheets"]["sheet_url"])
     elif not skip_sheets:
         st.link_button("Open in Google Sheets", sheet_url())

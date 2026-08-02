@@ -19,13 +19,15 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-4. **Gemini:** create an API key and set `GEMINI_API_KEY`. Optionally set `GEMINI_MODEL` (default `gemini-2.5-flash`). Multimodal calls cost more than text-only; the portal caps uploads at **5 images**.
+4. **Gemini:** create an API key and set `GEMINI_API_KEY`. Optionally set `GEMINI_MODEL` (default `gemini-3.6-flash`). Multimodal calls cost more than text-only; the portal caps uploads at **5 images**.
 5. **Google Sheet:**
    - Create a spreadsheet; note the ID from the URL.
+   - Add one tab per region (e.g. **New York**, **Chicago**) — same columns on each tab.
+   - Set `GOOGLE_SHEETS_REGIONS=New York,Chicago` in `.env` (comma-separated tab names).
    - In Google Cloud: enable Google Sheets API, create a service account, download JSON to `credentials/service_account.json`.
    - Share the spreadsheet with the service account email as **Editor**.
    - Set `GOOGLE_SHEETS_ID` in `.env`.
-   - Headers are created automatically on first write if the sheet is empty.
+   - Headers are created automatically on first write if a tab is empty.
 
 6. Run the portal:
 

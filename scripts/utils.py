@@ -25,7 +25,7 @@ def load_env() -> None:
 
 
 def get_model_name() -> str:
-    return os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+    return os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
 
 
 def get_gemini_client() -> genai.Client:

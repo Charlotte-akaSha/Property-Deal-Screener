@@ -111,6 +111,7 @@ def analyze_from_memory(
     link: str = "",
     property_label: str | None = None,
     image_uploads: list[tuple[str, bytes]] | None = None,
+    sheet_tab: str | None = None,
     skip_sheets: bool = False,
 ) -> dict[str, Any]:
     """Portal path: extract first, then create folder, score, persist, Sheets."""
@@ -129,14 +130,18 @@ def analyze_from_memory(
     )
     scored = score_property(extracted)
     analysis = persist_local(
-        folder, extracted=extracted, scored=scored, property_id=property_id
+        folder,
+        extracted=extracted,
+        scored=scored,
+        property_id=property_id,
+        sheet_tab=sheet_tab,
     )
 
     sheets_result: dict[str, Any] | None = None
     sheets_error: str | None = None
     if not skip_sheets:
         try:
-            sheets_result = upsert_analysis(analysis)
+            sheets_result = upsert_analysis(analysis, sheet_tab=sheet_tab)
         except Exception as exc:  # noqa: BLE001
             sheets_error = str(exc)
 
@@ -148,7 +153,9 @@ def analyze_from_memory(
     }
 
 
-def analyze_from_folder(folder: Path, *, skip_sheets: bool = False) -> dict[str, Any]:
+def analyze_from_folder(
+    folder: Path, *, sheet_tab: str | None = None, skip_sheets: bool = False
+) -> dict[str, Any]:
     """CLI path: folder already has listing.txt (+ optional photos)."""
     listing_path = folder / "listing.txt"
     if not listing_path.exists():
@@ -165,13 +172,17 @@ def analyze_from_folder(folder: Path, *, skip_sheets: bool = False) -> dict[str,
     property_id = folder.name
     scored = score_property(extracted)
     analysis = persist_local(
-        folder, extracted=extracted, scored=scored, property_id=property_id
+        folder,
+        extracted=extracted,
+        scored=scored,
+        property_id=property_id,
+        sheet_tab=sheet_tab,
     )
     sheets_result = None
     sheets_error = None
     if not skip_sheets:
         try:
-            sheets_result = upsert_analysis(analysis)
+            sheets_result = upsert_analysis(analysis, sheet_tab=sheet_tab)
         except Exception as exc:  # noqa: BLE001
             sheets_error = str(exc)
     return {
@@ -186,12 +197,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Analyze a property folder")
     parser.add_argument("property_dir", type=Path)
     parser.add_argument("--skip-sheets", action="store_true")
+    parser.add_argument("--region", help="Google Sheet tab name (e.g. 'New York')")
     args = parser.parse_args(argv)
     folder = args.property_dir
     if not folder.is_absolute():
         folder = (Path.cwd() / folder).resolve()
     try:
-        result = analyze_from_folder(folder, skip_sheets=args.skip_sheets)
+        result = analyze_from_folder(
+            folder, sheet_tab=args.region, skip_sheets=args.skip_sheets
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"Analysis failed: {exc}", file=sys.stderr)
         return 1
@@ -205,7 +219,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"WARNING: analysis succeeded, Sheet update failed: {result['sheets_error']}")
         return 2
     if result["sheets"]:
-        print(f"Sheets: {result['sheets']['action']} — {result['sheets']['sheet_url']}")
+        tab = result["sheets"].get("sheet_tab", "")
+        print(f"Sheets: {result['sheets']['action']} on '{tab}' — {result['sheets']['sheet_url']}")
     return 0
 
 

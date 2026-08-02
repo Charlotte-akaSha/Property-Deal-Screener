@@ -81,7 +81,17 @@ def _service_account_path() -> Path:
     return path
 
 
-def open_worksheet():
+def list_regions() -> list[str]:
+    """Regional tabs configured in .env (comma-separated)."""
+    load_env()
+    raw = os.getenv("GOOGLE_SHEETS_REGIONS", "").strip()
+    if raw:
+        return [name.strip() for name in raw.split(",") if name.strip()]
+    default = os.getenv("GOOGLE_SHEETS_TAB", "Properties").strip() or "Properties"
+    return [default]
+
+
+def open_worksheet(sheet_tab: str | None = None):
     load_env()
     sheet_id = os.getenv("GOOGLE_SHEETS_ID", "").strip()
     if not sheet_id:
@@ -92,7 +102,7 @@ def open_worksheet():
     creds = Credentials.from_service_account_file(str(creds_path), scopes=SCOPES)
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_key(sheet_id)
-    tab = os.getenv("GOOGLE_SHEETS_TAB", "Properties").strip() or "Properties"
+    tab = (sheet_tab or os.getenv("GOOGLE_SHEETS_TAB", "Properties")).strip() or "Properties"
     try:
         return spreadsheet.worksheet(tab)
     except gspread.WorksheetNotFound:
@@ -169,15 +179,21 @@ def find_row_by_property_id(ws, property_id: str) -> int | None:
     return None
 
 
-def upsert_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
-    ws = open_worksheet()
+def upsert_analysis(analysis: dict[str, Any], sheet_tab: str | None = None) -> dict[str, Any]:
+    tab = sheet_tab or analysis.get("meta", {}).get("sheet_tab")
+    ws = open_worksheet(tab)
     ensure_headers(ws)
     row = analysis_to_row(analysis)
     property_id = str(row[0])
     existing = find_row_by_property_id(ws, property_id)
     if existing is None:
         ws.append_row(row, value_input_option="USER_ENTERED")
-        return {"action": "append", "property_id": property_id, "sheet_url": sheet_url()}
+        return {
+            "action": "append",
+            "property_id": property_id,
+            "sheet_tab": ws.title,
+            "sheet_url": sheet_url(),
+        }
     # Update only non-personal columns; leave Personal columns untouched
     updatable = row[:UPDATABLE_COUNT]
     end_col = gspread.utils.rowcol_to_a1(1, UPDATABLE_COUNT).replace("1", "")
@@ -186,30 +202,40 @@ def upsert_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
         values=[updatable],
         value_input_option="USER_ENTERED",
     )
-    return {"action": "update", "property_id": property_id, "sheet_url": sheet_url(), "row": existing}
+    return {
+        "action": "update",
+        "property_id": property_id,
+        "sheet_tab": ws.title,
+        "sheet_url": sheet_url(),
+        "row": existing,
+    }
 
 
-def upsert_from_folder(folder: Path) -> dict[str, Any]:
+def upsert_from_folder(folder: Path, sheet_tab: str | None = None) -> dict[str, Any]:
     latest = folder / "latest.json"
     if not latest.exists():
         raise FileNotFoundError(f"No latest.json in {folder}")
     analysis = json.loads(latest.read_text(encoding="utf-8"))
-    return upsert_analysis(analysis)
+    return upsert_analysis(analysis, sheet_tab=sheet_tab)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Upsert property analysis to Google Sheets")
     parser.add_argument("property_dir", type=Path, help="Path to property folder with latest.json")
+    parser.add_argument(
+        "--region",
+        help="Sheet tab name (defaults to sheet_tab stored in latest.json or .env)",
+    )
     args = parser.parse_args(argv)
     folder = args.property_dir
     if not folder.is_absolute():
         folder = (Path.cwd() / folder).resolve()
     try:
-        result = upsert_from_folder(folder)
+        result = upsert_from_folder(folder, sheet_tab=args.region)
     except Exception as exc:  # noqa: BLE001 — CLI surface
         print(f"Sheets upsert failed: {exc}", file=sys.stderr)
         return 1
-    print(f"Sheets {result['action']} OK for {result['property_id']}")
+    print(f"Sheets {result['action']} OK for {result['property_id']} on tab '{result['sheet_tab']}'")
     print(result["sheet_url"])
     return 0
 

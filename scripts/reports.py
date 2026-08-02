@@ -52,18 +52,22 @@ def persist_local(
     extracted: dict[str, Any],
     scored: dict[str, Any],
     property_id: str,
+    sheet_tab: str | None = None,
 ) -> dict[str, Any]:
     folder.mkdir(parents=True, exist_ok=True)
     ts = timestamp_slug()
+    meta: dict[str, Any] = {
+        "property_id": property_id,
+        "analyzed_at": datetime.now(timezone.utc).isoformat(),
+        "model": get_model_name(),
+        "prompt_version": PROMPT_VERSION,
+    }
+    if sheet_tab:
+        meta["sheet_tab"] = sheet_tab
     analysis = {
         "extracted": extracted,
         "scored": scored,
-        "meta": {
-            "property_id": property_id,
-            "analyzed_at": datetime.now(timezone.utc).isoformat(),
-            "model": get_model_name(),
-            "prompt_version": PROMPT_VERSION,
-        },
+        "meta": meta,
     }
     analysis_path = folder / f"analysis_{ts}.json"
     report_path = folder / f"report_{ts}.md"
