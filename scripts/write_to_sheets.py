@@ -25,20 +25,22 @@ SCOPES = [
 
 HEADERS = [
     "Property ID",
-    "Address",
+    "Link",
     "City",
     "State",
-    "Link",
-    "Status",
+    "Overall",
     "Price",
     "Price/sqft",
     "Taxes",
-    "HOA",
     "Estimated Insurance",
-    "Bedrooms",
-    "Bathrooms",
+    "Estimated Rent",
     "House Size",
     "Land Size",
+    "Bedrooms",
+    "Bathrooms",
+    "Walk to Station",
+    "Train to City Center",
+    "Total to City Center",
     "Year Built",
     "Garage",
     "Basement",
@@ -47,7 +49,11 @@ HEADERS = [
     "Water",
     "Sewer",
     "Internet",
-    "Overall",
+    "Recommendation",
+    "Strengths",
+    "Weaknesses",
+    "Questions to Ask",
+    "Red Flags",
     "Financial",
     "Location",
     "Property",
@@ -57,11 +63,6 @@ HEADERS = [
     "Lifestyle",
     "Climate",
     "Risk",
-    "Recommendation",
-    "Strengths",
-    "Weaknesses",
-    "Questions to Ask",
-    "Red Flags",
     "Wow Factor",
     "Notes",
     "Visit Date",
@@ -113,6 +114,9 @@ def ensure_headers(ws) -> None:
     values = ws.row_values(1)
     if not values or not any(values):
         ws.update(range_name="A1", values=[HEADERS])
+        return
+    if len(values) < len(HEADERS) or values[: len(HEADERS)] != HEADERS:
+        ws.update(range_name="A1", values=[HEADERS])
 
 
 def sheet_url() -> str:
@@ -125,50 +129,65 @@ def analysis_to_row(analysis: dict[str, Any]) -> list[Any]:
     e = analysis["extracted"]
     s = analysis["scored"]
     c = s["categories"]
-    return [
-        analysis["meta"]["property_id"],
-        e.get("address", ""),
-        e.get("city", ""),
-        e.get("state", ""),
-        e.get("link", ""),
-        e.get("status", "New"),
-        e.get("price"),
-        e.get("price_per_sqft"),
-        e.get("taxes"),
-        e.get("hoa"),
-        e.get("estimated_insurance"),
-        e.get("bedrooms"),
-        e.get("bathrooms"),
-        e.get("house_sqft"),
-        e.get("lot_sqft"),
-        e.get("year_built"),
-        e.get("garage", ""),
-        e.get("basement", ""),
-        e.get("heating", ""),
-        e.get("cooling", ""),
-        e.get("water", ""),
-        e.get("sewer", ""),
-        e.get("internet", ""),
-        s.get("overall"),
-        c.get("financial"),
-        c.get("location"),
-        c.get("property"),
-        c.get("appreciation"),
-        c.get("rental"),
-        c.get("management"),
-        c.get("lifestyle"),
-        c.get("climate"),
-        c.get("risk"),
-        s.get("recommendation", ""),
-        join_list(s.get("strengths")),
-        join_list(s.get("weaknesses")),
-        join_list(s.get("questions_to_ask")),
-        join_list(s.get("red_flags")),
-        "",  # Wow Factor
-        "",  # Notes
-        "",  # Visit Date
-        "",  # Final Decision
-    ]
+    t = analysis.get("transit") or {}
+    walk = t.get("walk_to_station") or ""
+    if t.get("nearest_station") and walk:
+        walk = f"{walk} — {t['nearest_station']}"
+    train = t.get("train_to_city_center") or ""
+    if t.get("train_departure_at") and train:
+        train = f"{train} (dep. {t['train_departure_at']})"
+    if t.get("city_center") and train:
+        train = f"{train} → {t['city_center']}"
+    total = t.get("total_to_city_center") or ""
+    if total and t.get("train_departure_at"):
+        total = f"{total} (walk + train, dep. {t['train_departure_at']})"
+
+    by_header: dict[str, Any] = {
+        "Property ID": analysis["meta"]["property_id"],
+        "Link": e.get("link", ""),
+        "City": e.get("city", ""),
+        "State": e.get("state", ""),
+        "Overall": s.get("overall"),
+        "Price": e.get("price"),
+        "Price/sqft": e.get("price_per_sqft"),
+        "Taxes": e.get("taxes"),
+        "Estimated Insurance": e.get("estimated_insurance"),
+        "Estimated Rent": e.get("estimated_rent"),
+        "House Size": e.get("house_sqft"),
+        "Land Size": e.get("lot_sqft"),
+        "Bedrooms": e.get("bedrooms"),
+        "Bathrooms": e.get("bathrooms"),
+        "Walk to Station": walk,
+        "Train to City Center": train,
+        "Total to City Center": total,
+        "Year Built": e.get("year_built"),
+        "Garage": e.get("garage", ""),
+        "Basement": e.get("basement", ""),
+        "Heating": e.get("heating", ""),
+        "Cooling": e.get("cooling", ""),
+        "Water": e.get("water", ""),
+        "Sewer": e.get("sewer", ""),
+        "Internet": e.get("internet", ""),
+        "Recommendation": s.get("recommendation", ""),
+        "Strengths": join_list(s.get("strengths")),
+        "Weaknesses": join_list(s.get("weaknesses")),
+        "Questions to Ask": join_list(s.get("questions_to_ask")),
+        "Red Flags": join_list(s.get("red_flags")),
+        "Financial": c.get("financial"),
+        "Location": c.get("location"),
+        "Property": c.get("property"),
+        "Appreciation": c.get("appreciation"),
+        "Rental": c.get("rental"),
+        "Management": c.get("management"),
+        "Lifestyle": c.get("lifestyle"),
+        "Climate": c.get("climate"),
+        "Risk": c.get("risk"),
+        "Wow Factor": "",
+        "Notes": "",
+        "Visit Date": "",
+        "Final Decision": "",
+    }
+    return [by_header[h] for h in HEADERS]
 
 
 def find_row_by_property_id(ws, property_id: str) -> int | None:

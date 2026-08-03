@@ -23,6 +23,13 @@ def main() -> int:
         print("MISSING  GEMINI_API_KEY")
         ok = False
 
+    maps_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+    if maps_key:
+        print(f"OK  GOOGLE_MAPS_API_KEY set ({maps_key[:8]}...)")
+    else:
+        print("MISSING  GOOGLE_MAPS_API_KEY (required for Walk to Station / Train to City Center)")
+        ok = False
+
     sheet_id = os.getenv("GOOGLE_SHEETS_ID", "").strip()
     if sheet_id:
         print(f"OK  GOOGLE_SHEETS_ID set ({sheet_id[:8]}...)")

@@ -20,7 +20,14 @@ cp .env.example .env
 ```
 
 4. **Gemini:** create an API key and set `GEMINI_API_KEY`. Optionally set `GEMINI_MODEL` (default `gemini-3.6-flash`). Multimodal calls cost more than text-only; the portal caps uploads at **5 images**.
-5. **Google Sheet:**
+5. **Google Maps (transit columns):**
+   - In the same Google Cloud project, enable **Geocoding**, **Places**, **Distance Matrix**, and **Directions** APIs.
+   - Create or reuse an API key; set `GOOGLE_MAPS_API_KEY` in `.env`.
+   - On each analysis, the app geocodes the address, finds the nearest train/transit station, and computes:
+     - **Walk to Station** — walking time/distance (not from the listing)
+     - **Train to City Center** — transit time from that station to the regional hub (New York → Grand Central; Chicago → Millennium Station)
+   - Override hubs per tab with `CITY_CENTER_NEW_YORK` / `CITY_CENTER_CHICAGO` in `.env` if needed.
+6. **Google Sheet:**
    - Create a spreadsheet; note the ID from the URL.
    - Add one tab per region (e.g. **New York**, **Chicago**) — same columns on each tab.
    - Set `GOOGLE_SHEETS_REGIONS=New York,Chicago` in `.env` (comma-separated tab names).
@@ -28,8 +35,9 @@ cp .env.example .env
    - Share the spreadsheet with the service account email as **Editor**.
    - Set `GOOGLE_SHEETS_ID` in `.env`.
    - Headers are created automatically on first write if a tab is empty.
+   - If you already have data, insert two columns after **State**: **Walk to Station**, **Train to City Center** (or clear row 1 and re-run — the app will rewrite headers).
 
-6. Run the portal:
+7. Run the portal:
 
 ```bash
 streamlit run portal.py
@@ -39,8 +47,9 @@ streamlit run portal.py
 
 ```bash
 # Folder must already contain listing.txt (+ optional photoN.*)
-python scripts/analyze_property.py properties/Some_Property_Slug
-python scripts/analyze_property.py properties/Some_Property_Slug --skip-sheets
+# --region is required when GOOGLE_SHEETS_REGIONS has multiple tabs
+python scripts/analyze_property.py properties/Some_Property_Slug --region "New York"
+python scripts/analyze_property.py properties/Some_Property_Slug --skip-sheets --region "New York"
 python scripts/write_to_sheets.py properties/Some_Property_Slug
 ```
 

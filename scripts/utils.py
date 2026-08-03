@@ -5,19 +5,23 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
 import jsonschema
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 MAX_PHOTOS = 5
 PROMPT_VERSION = "extraction_v1 / scoring_v1"
+MAX_API_RETRIES = 4
+API_RETRY_BASE_DELAY_SEC = 2.0
+TRANSIENT_API_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def load_env() -> None:
@@ -133,6 +137,37 @@ def parse_json_response(text: str) -> Any:
     return json.loads(text)
 
 
+def is_transient_api_error(exc: Exception) -> bool:
+    if isinstance(exc, errors.ServerError):
+        return True
+    if isinstance(exc, errors.APIError):
+        return exc.code in TRANSIENT_API_STATUS_CODES
+    return False
+
+
+def generate_content_with_retry(
+    client: genai.Client,
+    *,
+    model: str,
+    contents: list[Any],
+    config: types.GenerateContentConfig,
+) -> Any:
+    last_error: Exception | None = None
+    for attempt in range(MAX_API_RETRIES):
+        try:
+            return client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+        except Exception as exc:
+            if not is_transient_api_error(exc) or attempt == MAX_API_RETRIES - 1:
+                raise
+            last_error = exc
+            time.sleep(API_RETRY_BASE_DELAY_SEC * (2**attempt))
+    raise RuntimeError(f"Gemini API failed after {MAX_API_RETRIES} retries") from last_error
+
+
 def generate_json(
     client: genai.Client,
     *,
@@ -147,7 +182,8 @@ def generate_json(
             "Previous response failed validation. Fix and return valid JSON only.\n"
             f"Validation error:\n{retry_hint}"
         )
-    response = client.models.generate_content(
+    response = generate_content_with_retry(
+        client,
         model=get_model_name(),
         contents=contents,
         config=types.GenerateContentConfig(
@@ -190,7 +226,24 @@ def generate_json_with_retry(
     raise RuntimeError(f"JSON validation failed after retry: {last_error}") from last_error
 
 
-def join_list(items: list[str] | None) -> str:
+def normalize_list_items(items: list[str] | None) -> list[str]:
     if not items:
+        return []
+    result: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if not text:
+            continue
+        for part in re.split(r"\n+|\s\|\s", text):
+            part = re.sub(r"^[-*•]\s+", "", part.strip())
+            if part:
+                result.append(part)
+    return result
+
+
+def join_list(items: list[str] | None) -> str:
+    """Newline-separated bullets for Google Sheets cells and exports."""
+    normalized = normalize_list_items(items)
+    if not normalized:
         return ""
-    return " | ".join(str(i) for i in items)
+    return "\n".join(f"• {item}" for item in normalized)

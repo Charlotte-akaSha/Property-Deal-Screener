@@ -46,7 +46,8 @@ def main() -> int:
         "price_per_sqft": 293.1,
         "taxes": 8200,
         "hoa": 0,
-        "estimated_insurance": None,
+        "estimated_insurance": 1800,
+        "estimated_rent": 2800,
         "bedrooms": 3,
         "bathrooms": 2,
         "house_sqft": 1450,
@@ -89,11 +90,27 @@ def main() -> int:
         "overall": overall,
         "overall_computed_from_weights": True,
     }
+    transit = {
+        "nearest_station": "Ossining Metro-North",
+        "walk_to_station": "18 mins walk (0.9 mi)",
+        "walk_to_station_minutes": 18,
+        "train_to_city_center": "1 hour 5 mins",
+        "train_to_city_center_minutes": 65,
+        "total_to_city_center": "1 hour 23 mins",
+        "total_to_city_center_minutes": 83,
+        "train_departure_at": "Mon 8:00 AM EDT",
+        "city_center": "Grand Central Terminal, New York, NY",
+        "source": "google_maps",
+    }
 
     with tempfile.TemporaryDirectory() as tmp:
         folder = Path(tmp) / pid
         analysis = persist_local(
-            folder, extracted=extracted, scored=scored, property_id=pid
+            folder,
+            extracted=extracted,
+            scored=scored,
+            property_id=pid,
+            transit=transit,
         )
         assert (folder / "latest.json").exists()
         reports = list(folder.glob("report_*.md"))
@@ -107,6 +124,12 @@ def main() -> int:
     row = analysis_to_row(analysis)
     assert len(row) == len(HEADERS)
     assert row[0] == pid
+    walk_col = HEADERS.index("Walk to Station")
+    train_col = HEADERS.index("Train to City Center")
+    assert "Ossining Metro-North" in row[walk_col]
+    assert "Grand Central" in row[train_col]
+    total_col = HEADERS.index("Total to City Center")
+    assert "walk + train" in row[total_col]
     assert row[-4:] == ["", "", "", ""]  # Personal blank on write payload
 
     fixture = ROOT / "fixtures" / "sample_listing.txt"

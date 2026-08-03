@@ -28,13 +28,26 @@ from utils import (
     property_id_from_extracted,
     strategy_rules_without_weights,
 )
-from write_to_sheets import upsert_analysis
+from transit_lookup import lookup_transit
+from write_to_sheets import list_regions, upsert_analysis
+
+
+def _region_for_transit(sheet_tab: str | None) -> str:
+    if sheet_tab:
+        return sheet_tab
+    regions = list_regions()
+    if len(regions) == 1:
+        return regions[0]
+    raise ValueError(
+        "Region is required for transit lookup. Choose a region in the portal or pass --region."
+    )
 
 
 def extract_facts(
     listing_text: str,
     *,
     link: str = "",
+    user_comments: str = "",
     image_paths: list[Path] | None = None,
     image_uploads: list[tuple[str, bytes]] | None = None,
 ) -> dict[str, Any]:
@@ -45,6 +58,8 @@ def extract_facts(
         "Listing URL (may be empty):\n" + (link or "(none)"),
         "Listing text:\n" + listing_text,
     ]
+    if user_comments.strip():
+        user_parts.append("User comments (investor notes):\n" + user_comments.strip())
     if image_uploads:
         user_parts.extend(image_parts_from_uploads(image_uploads))
     elif image_paths:
@@ -59,16 +74,30 @@ def extract_facts(
     return extracted
 
 
-def score_property(extracted: dict[str, Any]) -> dict[str, Any]:
+def score_property(
+    extracted: dict[str, Any],
+    transit: dict[str, Any] | None = None,
+    *,
+    user_comments: str = "",
+) -> dict[str, Any]:
     client = get_gemini_client()
     schema = load_schema("scoring_schema.json")
     prompt = load_prompt("scoring_prompt.md")
     strategy = strategy_rules_without_weights(load_strategy_raw())
     weights = parse_weights()
+    payload = dict(extracted)
+    if transit:
+        payload["transit"] = transit
     user_parts = [
         "Investment strategy rules:\n" + strategy,
-        "Extracted property facts (JSON):\n" + json.dumps(extracted, indent=2),
+        "Extracted property facts (JSON):\n" + json.dumps(payload, indent=2),
+        "Note: transit walk/train times are computed via Google Maps, not from the listing.",
     ]
+    if user_comments.strip():
+        user_parts.append(
+            "User comments (investor notes — weigh alongside extracted facts when scoring):\n"
+            + user_comments.strip()
+        )
     scored_raw = generate_json_with_retry(
         client, system_prompt=prompt, user_parts=user_parts, schema=schema
     )
@@ -91,11 +120,14 @@ def save_listing_inputs(
     *,
     listing_text: str,
     link: str = "",
+    user_comments: str = "",
     image_uploads: list[tuple[str, bytes]] | None = None,
 ) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     body = (link.strip() + "\n\n" if link.strip() else "") + listing_text.strip() + "\n"
     (folder / "listing.txt").write_text(body, encoding="utf-8")
+    if user_comments.strip():
+        (folder / "user_comments.txt").write_text(user_comments.strip() + "\n", encoding="utf-8")
     if not image_uploads:
         return
     for i, (name, data) in enumerate(image_uploads[:MAX_PHOTOS], start=1):
@@ -109,6 +141,7 @@ def analyze_from_memory(
     listing_text: str,
     *,
     link: str = "",
+    user_comments: str = "",
     property_label: str | None = None,
     image_uploads: list[tuple[str, bytes]] | None = None,
     sheet_tab: str | None = None,
@@ -120,21 +153,31 @@ def analyze_from_memory(
     if image_uploads and len(image_uploads) > MAX_PHOTOS:
         raise ValueError(f"At most {MAX_PHOTOS} photos allowed.")
 
+    comments = user_comments.strip()
     extracted = extract_facts(
-        listing_text, link=link, image_uploads=image_uploads or []
+        listing_text,
+        link=link,
+        user_comments=comments,
+        image_uploads=image_uploads or [],
     )
+    transit = lookup_transit(extracted, sheet_tab=_region_for_transit(sheet_tab))
     property_id = property_id_from_extracted(extracted, property_label)
     folder = ROOT / "properties" / property_id
     save_listing_inputs(
-        folder, listing_text=listing_text, link=link, image_uploads=image_uploads
+        folder,
+        listing_text=listing_text,
+        link=link,
+        user_comments=comments,
+        image_uploads=image_uploads,
     )
-    scored = score_property(extracted)
+    scored = score_property(extracted, transit=transit, user_comments=comments)
     analysis = persist_local(
         folder,
         extracted=extracted,
         scored=scored,
         property_id=property_id,
         sheet_tab=sheet_tab,
+        transit=transit,
     )
 
     sheets_result: dict[str, Any] | None = None
@@ -167,16 +210,24 @@ def analyze_from_folder(
     if lines and lines[0].startswith("http"):
         link = lines[0].strip()
         text = "\n".join(lines[1:]).lstrip("\n")
+    comments_path = folder / "user_comments.txt"
+    user_comments = (
+        comments_path.read_text(encoding="utf-8").strip() if comments_path.exists() else ""
+    )
     images = discover_images(folder)
-    extracted = extract_facts(text, link=link, image_paths=images)
+    extracted = extract_facts(
+        text, link=link, user_comments=user_comments, image_paths=images
+    )
     property_id = folder.name
-    scored = score_property(extracted)
+    transit = lookup_transit(extracted, sheet_tab=_region_for_transit(sheet_tab))
+    scored = score_property(extracted, transit=transit, user_comments=user_comments)
     analysis = persist_local(
         folder,
         extracted=extracted,
         scored=scored,
         property_id=property_id,
         sheet_tab=sheet_tab,
+        transit=transit,
     )
     sheets_result = None
     sheets_error = None
@@ -214,6 +265,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Property ID: {analysis['meta']['property_id']}")
     print(f"Overall: {scored['overall']}/10")
     print(f"Recommendation: {scored['recommendation']}")
+    transit = analysis.get("transit") or {}
+    if transit:
+        print(
+            f"Walk to station: {transit.get('walk_to_station')} ({transit.get('nearest_station')})"
+        )
+        print(
+            f"Train to city center: {transit.get('train_to_city_center')} "
+            f"(dep. {transit.get('train_departure_at')}) → {transit.get('city_center')}\n"
+            f"Total to city center: {transit.get('total_to_city_center')} (walk + train)"
+        )
     print(f"Saved to: {result['folder']}")
     if result["sheets_error"]:
         print(f"WARNING: analysis succeeded, Sheet update failed: {result['sheets_error']}")

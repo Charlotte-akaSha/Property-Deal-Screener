@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from utils import PROMPT_VERSION, get_model_name
+from utils import PROMPT_VERSION, get_model_name, join_list
 
 
 def timestamp_slug() -> str:
@@ -27,22 +27,38 @@ def write_report_md(analysis: dict[str, Any], path: Path) -> None:
         "",
         f"**Recommendation:** {s['recommendation']}",
         "",
-        "## Strengths",
-        *[f"- {x}" for x in s.get("strengths") or ["(none)"]],
-        "",
-        "## Weaknesses",
-        *[f"- {x}" for x in s.get("weaknesses") or ["(none)"]],
-        "",
-        "## Red Flags",
-        *[f"- {x}" for x in s.get("red_flags") or ["(none)"]],
-        "",
-        "## Questions to Ask",
-        *[f"- {x}" for x in s.get("questions_to_ask") or ["(none)"]],
-        "",
-        "## Rationale",
-        s.get("rationale") or "",
-        "",
     ]
+    t = analysis.get("transit") or {}
+    if t:
+        lines.extend(
+            [
+                "## Transit (Google Maps)",
+                f"- **Walk to station:** {t.get('walk_to_station', '')} ({t.get('nearest_station', '')})",
+                f"- **Train to city center:** {t.get('train_to_city_center', '')} "
+                f"(dep. {t.get('train_departure_at', 'Mon 8:00 AM')}) → {t.get('city_center', '')}",
+                f"- **Total to city center:** {t.get('total_to_city_center', '')} (walk + train)",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Strengths",
+            join_list(s.get("strengths")) or "(none)",
+            "",
+            "## Weaknesses",
+            join_list(s.get("weaknesses")) or "(none)",
+            "",
+            "## Red Flags",
+            join_list(s.get("red_flags")) or "(none)",
+            "",
+            "## Questions to Ask",
+            join_list(s.get("questions_to_ask")) or "(none)",
+            "",
+            "## Rationale",
+            s.get("rationale") or "",
+            "",
+        ]
+    )
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -53,6 +69,7 @@ def persist_local(
     scored: dict[str, Any],
     property_id: str,
     sheet_tab: str | None = None,
+    transit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     folder.mkdir(parents=True, exist_ok=True)
     ts = timestamp_slug()
@@ -69,6 +86,8 @@ def persist_local(
         "scored": scored,
         "meta": meta,
     }
+    if transit:
+        analysis["transit"] = transit
     analysis_path = folder / f"analysis_{ts}.json"
     report_path = folder / f"report_{ts}.md"
     latest_path = folder / "latest.json"
