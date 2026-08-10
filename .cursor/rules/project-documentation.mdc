@@ -1,0 +1,99 @@
+---
+description: Persistent documentation workflow for Property Screener — read docs before substantial work, keep them accurate, never invent future architecture.
+alwaysApply: true
+---
+
+# Property Screener — Documentation Rules
+
+> **Repository state**
+>
+> - **Committed baseline (`15b2c83`):** `portal.py`, analyze-only. No Compare or multi-page UI files.
+> - **Local working tree (uncommitted):** `streamlit_app.py`, `app_pages/`, Compare, supporting modules; `portal.py` deleted locally.
+> - **Never assume the refactor exists on a clean clone of `15b2c83`.** Run `git status` and inspect files when ambiguous.
+> - **Streamlit UI:** **CURRENT** in the local tree; **TEMPORARY BRIDGE** architecturally (future target is a web app). Use both labels.
+
+## Bootstrap
+
+1. Read `docs/ai-context.md` first in a new or recovered session.
+2. Read `docs/current-status.md` before handoff work or migration tasks.
+3. Treat **repository code** as authoritative when docs conflict — then update docs.
+
+## Repository state when documenting
+
+- Distinguish **committed baseline** (`15b2c83`) from **local uncommitted** changes when behavior or availability matters.
+- Run `git status` and confirm which files exist before stating what the repo supports.
+- Never document an uncommitted feature (e.g. Compare, `streamlit_app.py`) as available on a clean checkout of `15b2c83`.
+
+## Classification labels
+
+Use these consistently in docs and comments:
+
+| Label | Meaning |
+|-------|---------|
+| **CURRENT** | Implemented and in use **in the tree you are working in** (check git status) |
+| **LEGACY** | Superseded; may still exist at older commits (e.g. `portal.py` at `15b2c83`) |
+| **MIGRATION IN PROGRESS** | Partially done; especially uncommitted UI refactor |
+| **ALREADY MIGRATED** | Done beyond original plan (e.g. Compare dashboard) |
+| **TEMPORARY BRIDGE** | Works now but not long-term architecture — includes Streamlit UI (local) and Google Sheets |
+| **FUTURE TARGET** | Planned; **not implemented** — never describe as existing |
+
+## Source-of-truth hierarchy
+
+1. Code (`scripts/`, `app_pages/`, `streamlit_app.py`)
+2. `strategy.md` — investment weights, criteria, philosophy
+3. `scripts/write_to_sheets.py` `HEADERS` — Sheet schema
+4. `prompts/` + `schema/` — AI contracts
+5. `docs/` — synthesized context (update when 1–4 change meaningfully)
+
+Do **not** duplicate full strategy content outside `strategy.md`.
+
+## Entry points
+
+- **Local working tree:** `streamlit_app.py` + `app_pages/` (**CURRENT** / **TEMPORARY BRIDGE**)
+- **Committed baseline (`15b2c83`):** `portal.py` (analyze-only)
+- **LEGACY** (relative to local refactor): `portal.py` — deleted locally, present at `15b2c83`
+
+## Future architecture guardrails
+
+- No REST API, auth, production DB, or cloud deployment exists today.
+- Framer Motion belongs to the **FUTURE TARGET** React/Next.js-style frontend — not Streamlit.
+- Do not lock frontend/backend stack unless the repo establishes it.
+- Google Sheets is the **CURRENT** store and **TEMPORARY BRIDGE** — not already replaced.
+- Manual listing paste is **CURRENT** v1 ingestion — no scraping unless explicitly built.
+- Weighted overall score is computed in `scoring.py` — the LLM does not set it.
+
+## When to update documentation
+
+Update docs after **meaningful** changes — not for trivial one-line bug fixes.
+
+| Change type | Primary docs to review/update |
+|-------------|-------------------------------|
+| Schema / data / Sheet columns | `database-schema.md`, `architecture.md`, `current-status.md` |
+| Product behavior / workflows | `product-requirements.md`, `current-status.md` |
+| Architecture / modules / integrations | `architecture.md`, `ai-context.md`, `project-decisions.md` |
+| Investment strategy / weights | `strategy.md` (canonical), `investment-criteria.md` (implementation only) |
+| Deployment / env / config | `architecture.md`, `current-status.md`, `README.md` |
+| Migration / web app planning | `web-migration.md`, `roadmap.md` |
+| Legacy removal | `current-status.md`, `project-decisions.md`, `web-migration.md` |
+| Important project context | `ai-context.md`, `current-status.md` |
+| Ordinary bug fix | Usually none — avoid documentation churn |
+
+## Legacy removal
+
+- **Verify migration completion in code** before removing legacy systems.
+- Never delete `portal.py`, Sheets integration, or Streamlit files solely because docs say they are planned for removal.
+- Document the removal in `current-status.md` and `project-decisions.md` after it happens.
+
+## Security
+
+- Never copy secrets, API keys, tokens, or credential file contents into docs.
+- Do not commit `.env`, `credentials/`, or `keys ect....odt`.
+- Do not open or summarize sensitive untracked files unless absolutely necessary.
+
+## After context summarization
+
+Recover by reading `docs/ai-context.md`, `docs/current-status.md`, and inspecting git status — not by assuming prior conversation state.
+
+## Conciseness
+
+Keep docs short and useful. Prefer updating existing files over creating new ones. No documentation bureaucracy.
