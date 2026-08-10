@@ -7,6 +7,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pandas as pd
+
 _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
@@ -135,11 +137,45 @@ def main() -> int:
     fixture = ROOT / "fixtures" / "sample_listing.txt"
     assert fixture.exists() and "100 Oak Street" in fixture.read_text(encoding="utf-8")
 
+    from sheets_data import add_derived_columns, parse_commute_minutes  # noqa: E402
+
+    assert parse_commute_minutes("1 hour 23 mins (walk + train)") == 83.0
+    assert parse_commute_minutes("") is None
+
+    sample = pd.DataFrame(
+        [
+            {
+                "Property ID": "Test_Prop",
+                # Sheets returns money columns as formatted strings
+                "Price": "$400,000",
+                "Estimated Rent": "$2,500",
+                "Taxes": "$6,000",
+                "Estimated Insurance": "$1,800",
+                "Total to City Center": "45 mins (walk + train)",
+                "Financial": 8,
+                "Location": 7,
+                "Property": 8,
+                "Appreciation": 7,
+                "Rental": 8,
+                "Management": 7,
+                "Lifestyle": 6,
+                "Climate": 8,
+                "Risk": 7,
+            }
+        ]
+    )
+    derived = add_derived_columns(sample)
+    assert derived["Commute (min)"].iloc[0] == 45.0
+    assert derived["Price"].iloc[0] == 400000
+    assert abs(derived["Gross yield %"].iloc[0] - 7.5) < 0.01
+    assert abs(derived["Net monthly"].iloc[0] - 1850.0) < 0.01
+    assert len(derived["Score profile"].iloc[0]) == 9
+
     print("Offline smoke tests passed.")
     print("Next: copy .env.example → .env, add Gemini + Sheets credentials, then:")
     print("  python scripts/check_credentials.py")
     print("  python scripts/analyze_property.py <property_dir> --skip-sheets")
-    print("  streamlit run portal.py")
+    print("  streamlit run streamlit_app.py")
     return 0
 
 

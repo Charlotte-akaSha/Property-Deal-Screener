@@ -37,11 +37,15 @@ cp .env.example .env
    - Headers are created automatically on first write if a tab is empty.
    - If you already have data, insert two columns after **State**: **Walk to Station**, **Train to City Center** (or clear row 1 and re-run — the app will rewrite headers).
 
-7. Run the portal:
+7. Run the app:
 
 ```bash
-streamlit run portal.py
+streamlit run streamlit_app.py
 ```
+
+Use **Analyze** to score a new listing; use **Compare** to filter, map, chart, and compare every property in your Google Sheet (and edit Wow Factor, Notes, Visit Date, Final Decision).
+
+The **Map** tab plots each property using `GOOGLE_MAPS_API_KEY`. Coordinates are cached in `.cache/geocode.json`, so each address is geocoded only once — delete that file to force a refresh.
 
 ## CLI
 

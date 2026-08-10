@@ -113,7 +113,7 @@ def _next_commute_departure(sheet_tab: str | None) -> tuple[int, str]:
     return int(departure.timestamp()), label
 
 
-def _geocode(address: str) -> tuple[float, float]:
+def geocode_address(address: str) -> tuple[float, float]:
     data = _maps_request("geocode", {"address": address})
     if not data.get("results"):
         raise RuntimeError(f"Could not geocode address: {address}")
@@ -231,7 +231,7 @@ def lookup_transit(extracted: dict[str, Any], *, sheet_tab: str | None) -> dict[
     """
     address = format_property_address(extracted)
     city_center = city_center_for_region(sheet_tab)
-    lat, lng = _geocode(address)
+    lat, lng = geocode_address(address)
     station = _find_nearest_rail_station(lat, lng)
     walk = _walking_to_station(address, station)
     departure_unix, departure_label = _next_commute_departure(sheet_tab)
