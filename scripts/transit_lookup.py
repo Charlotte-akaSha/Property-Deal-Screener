@@ -6,6 +6,8 @@ import json
 import math
 import os
 import ssl
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
@@ -15,6 +17,11 @@ from zoneinfo import ZoneInfo
 import certifi
 
 from utils import load_env
+
+MAPS_MAX_RETRIES = 4
+MAPS_RETRY_BASE_DELAY_SEC = 2.0
+TRANSIENT_MAPS_HTTP_CODES = {429, 500, 502, 503, 504}
+TRANSIENT_MAPS_API_STATUSES = frozenset({"OVER_QUERY_LIMIT", "UNKNOWN_ERROR"})
 
 DEFAULT_CITY_CENTERS = {
     "New York": "Grand Central Terminal, New York, NY",
@@ -48,17 +55,44 @@ def _ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=certifi.where())
 
 
+def _is_transient_maps_http_error(exc: urllib.error.HTTPError) -> bool:
+    return exc.code in TRANSIENT_MAPS_HTTP_CODES
+
+
 def _maps_request(service: str, params: dict[str, Any]) -> dict[str, Any]:
     params = {k: v for k, v in params.items() if v is not None}
     params["key"] = _maps_key()
     url = f"https://maps.googleapis.com/maps/api/{service}/json?{urllib.parse.urlencode(params)}"
-    with urllib.request.urlopen(url, timeout=45, context=_ssl_context()) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    status = data.get("status")
-    if status not in ("OK", "ZERO_RESULTS"):
-        message = data.get("error_message") or status
-        raise RuntimeError(f"Google Maps API error ({service}): {message}")
-    return data
+    last_error: Exception | None = None
+    for attempt in range(MAPS_MAX_RETRIES):
+        try:
+            with urllib.request.urlopen(url, timeout=45, context=_ssl_context()) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            status = data.get("status")
+            if status in ("OK", "ZERO_RESULTS"):
+                return data
+            if status in TRANSIENT_MAPS_API_STATUSES and attempt < MAPS_MAX_RETRIES - 1:
+                time.sleep(MAPS_RETRY_BASE_DELAY_SEC * (2**attempt))
+                continue
+            message = data.get("error_message") or status
+            raise RuntimeError(f"Google Maps API error ({service}): {message}")
+        except urllib.error.HTTPError as exc:
+            if _is_transient_maps_http_error(exc) and attempt < MAPS_MAX_RETRIES - 1:
+                last_error = exc
+                time.sleep(MAPS_RETRY_BASE_DELAY_SEC * (2**attempt))
+                continue
+            raise RuntimeError(
+                f"Google Maps HTTP error ({service}): {exc.code} {exc.reason}"
+            ) from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt < MAPS_MAX_RETRIES - 1:
+                last_error = exc
+                time.sleep(MAPS_RETRY_BASE_DELAY_SEC * (2**attempt))
+                continue
+            raise RuntimeError(f"Google Maps request failed ({service}): {exc}") from exc
+    raise RuntimeError(
+        f"Google Maps API failed after {MAPS_MAX_RETRIES} retries ({service})"
+    ) from last_error
 
 
 def format_property_address(extracted: dict[str, Any]) -> str:

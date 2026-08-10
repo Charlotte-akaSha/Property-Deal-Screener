@@ -45,6 +45,46 @@ NUMERIC_COLUMNS = [
 PERSONAL_COLUMN_LIST = list(PERSONAL_HEADERS)
 
 
+def property_id_row_map(ws) -> dict[str, list[int]]:
+    """Map Property ID -> 1-based sheet row numbers (column A, data rows only)."""
+    ids = ws.col_values(1)
+    result: dict[str, list[int]] = {}
+    for row_num, value in enumerate(ids[1:], start=2):
+        pid = (value or "").strip()
+        if not pid:
+            continue
+        result.setdefault(pid, []).append(row_num)
+    return result
+
+
+def resolve_unique_sheet_row(ws, property_id: str, row_map: dict[str, list[int]] | None = None) -> int:
+    """
+    Resolve the live worksheet row for a Property ID.
+
+    Raises ValueError when the ID is missing, duplicated, or the row fails verification.
+    """
+    pid = property_id.strip()
+    if not pid:
+        raise ValueError("Property ID is empty.")
+    mapping = row_map if row_map is not None else property_id_row_map(ws)
+    rows = mapping.get(pid, [])
+    if not rows:
+        raise ValueError(f"Property ID '{pid}' was not found on sheet '{ws.title}'.")
+    if len(rows) > 1:
+        raise ValueError(
+            f"Property ID '{pid}' appears {len(rows)} times on sheet '{ws.title}' "
+            f"(rows {rows}). Remove duplicates before saving."
+        )
+    sheet_row = rows[0]
+    actual = (ws.cell(sheet_row, 1).value or "").strip()
+    if actual != pid:
+        raise ValueError(
+            f"Row {sheet_row} on sheet '{ws.title}' expected Property ID '{pid}' "
+            f"but found '{actual}'."
+        )
+    return sheet_row
+
+
 def parse_commute_minutes(text: object) -> float | None:
     if text is None or (isinstance(text, float) and pd.isna(text)):
         return None
@@ -81,7 +121,14 @@ def load_region(region: str) -> pd.DataFrame:
         return pd.DataFrame(columns=[*HEADERS, "Region", "_sheet_row"])
     df = pd.DataFrame(records)
     df["Region"] = region
-    df["_sheet_row"] = range(2, len(records) + 2)
+    row_map = property_id_row_map(ws)
+    df["_sheet_row"] = df["Property ID"].map(
+        lambda pid: (
+            row_map[str(pid).strip()][0]
+            if str(pid).strip() in row_map and len(row_map[str(pid).strip()]) == 1
+            else pd.NA
+        )
+    )
     return df
 
 
@@ -133,25 +180,10 @@ def personal_col_index(header: str) -> int:
     return HEADERS.index(header) + 1
 
 
-def save_personal_edits(edits: pd.DataFrame) -> int:
-    """Write personal columns only. Returns number of rows updated."""
+def save_personal_edits(edits: pd.DataFrame) -> tuple[int, list[str]]:
+    """Write personal columns only. Returns (rows updated, error messages)."""
     if edits.empty:
-        return 0
-    updates_by_region: dict[str, list[dict[str, Any]]] = {}
-    for _, row in edits.iterrows():
-        region = str(row["Region"])
-        sheet_row = int(row["_sheet_row"])
-        values: list[Any] = []
-        for col in PERSONAL_COLUMN_LIST:
-            val = row.get(col, "")
-            if pd.isna(val):
-                val = ""
-            elif col == "Visit Date" and val != "":
-                val = str(val)[:10]
-            values.append(val)
-        updates_by_region.setdefault(region, []).append(
-            {"row": sheet_row, "values": values}
-        )
+        return 0, []
 
     personal_start = UPDATABLE_COUNT + 1
     personal_end = len(HEADERS)
@@ -159,19 +191,36 @@ def save_personal_edits(edits: pd.DataFrame) -> int:
     end_cell = f"{_col_letter(personal_end)}"
 
     count = 0
-    for region, rows in updates_by_region.items():
-        ws = open_worksheet(region)
-        batch = [
-            {
-                "range": f"{start_cell}{item['row']}:{end_cell}{item['row']}",
-                "values": [item["values"]],
-            }
-            for item in rows
-        ]
+    errors: list[str] = []
+    for region, group in edits.groupby("Region", sort=False):
+        ws = open_worksheet(str(region))
+        row_map = property_id_row_map(ws)
+        batch: list[dict[str, Any]] = []
+        for _, row in group.iterrows():
+            property_id = str(row["Property ID"]).strip()
+            try:
+                sheet_row = resolve_unique_sheet_row(ws, property_id, row_map=row_map)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+            values: list[Any] = []
+            for col in PERSONAL_COLUMN_LIST:
+                val = row.get(col, "")
+                if pd.isna(val):
+                    val = ""
+                elif col == "Visit Date" and val != "":
+                    val = str(val)[:10]
+                values.append(val)
+            batch.append(
+                {
+                    "range": f"{start_cell}{sheet_row}:{end_cell}{sheet_row}",
+                    "values": [values],
+                }
+            )
         if batch:
             ws.batch_update(batch, value_input_option="USER_ENTERED")
             count += len(batch)
-    return count
+    return count, errors
 
 
 def _col_letter(n: int) -> str:

@@ -684,10 +684,21 @@ def render_notes_tab(df: pd.DataFrame, original: pd.DataFrame) -> None:
                 st.toast("Nothing changed.", icon=":material/info:")
                 return
             try:
-                count = save_personal_edits(pd.DataFrame(changes))
-                st.success(f"Saved {count} row(s) to Google Sheets.", icon=":material/check_circle:")
-                cached_load_properties.clear()
-                st.rerun()
+                count, save_errors = save_personal_edits(pd.DataFrame(changes))
+                for msg in save_errors:
+                    st.warning(msg, icon=":material/warning:")
+                if count:
+                    st.success(
+                        f"Saved {count} row(s) to Google Sheets.",
+                        icon=":material/check_circle:",
+                    )
+                    cached_load_properties.clear()
+                    st.rerun()
+                elif save_errors:
+                    st.error(
+                        "No rows were saved. Fix the issues above and try again.",
+                        icon=":material/error:",
+                    )
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Save failed: {exc}", icon=":material/error:")
 

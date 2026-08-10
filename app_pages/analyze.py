@@ -68,6 +68,11 @@ with form_col:
                     options=regions,
                     help="Each region is a separate tab with the same columns.",
                 )
+            save_to_google_sheets = st.checkbox(
+                "Save to Google Sheets",
+                value=True,
+                help="When unchecked, results are archived locally only.",
+            )
             submitted = st.form_submit_button(
                 "Analyze property", type="primary", icon=":material/bolt:"
             )
@@ -112,6 +117,7 @@ if submitted:
                 property_label=property_label.strip() or None,
                 image_uploads=uploads or None,
                 sheet_tab=region,
+                skip_sheets=not save_to_google_sheets,
             )
         except Exception as exc:  # noqa: BLE001
             if is_transient_api_error(exc):
@@ -168,7 +174,12 @@ if submitted:
         with theme_css.card("saved"):
             theme_css.section("Saved", "cloud_done", "mint")
             st.caption(f"Local archive: `{result['folder']}`")
-            if result.get("sheets_error"):
+            if not save_to_google_sheets:
+                st.info(
+                    "Saved locally only — Google Sheets was not updated.",
+                    icon=":material/folder:",
+                )
+            elif result.get("sheets_error"):
                 st.error(
                     "Analysis succeeded, but the Sheet update failed. Local files were saved.\n\n"
                     f"`{result['sheets_error']}`",
