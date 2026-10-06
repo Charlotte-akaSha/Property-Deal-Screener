@@ -50,8 +50,10 @@ def main() -> int:
         "hoa": 0,
         "estimated_insurance": 1800,
         "estimated_rent": 2800,
+        "gross_annual_income": None,
         "bedrooms": 3,
         "bathrooms": 2,
+        "legal_units": 1,
         "house_sqft": 1450,
         "lot_sqft": 12197,
         "year_built": 1988,
@@ -64,6 +66,9 @@ def main() -> int:
         "internet": "",
         "condition_notes": "Move-in ready",
         "flood_zone_notes": "No known flood zone issues disclosed",
+        "rental_units_notes": "",
+        "garage_trailer_notes": "",
+        "zoning_hoa_notes": "",
     }
     validate_against_schema(extracted, extract_schema)
 
@@ -122,7 +127,7 @@ def main() -> int:
         persist_local(folder, extracted=extracted, scored=scored, property_id=pid)
         assert len(list(folder.glob("analysis_*.json"))) == 2
 
-    assert UPDATABLE_COUNT == len(HEADERS) - len(PERSONAL_HEADERS)
+    assert UPDATABLE_COUNT == HEADERS.index("Wow Factor")
     row = analysis_to_row(analysis)
     assert len(row) == len(HEADERS)
     assert row[0] == pid
@@ -132,7 +137,10 @@ def main() -> int:
     assert "Grand Central" in row[train_col]
     total_col = HEADERS.index("Total to City Center")
     assert "walk + train" in row[total_col]
-    assert row[-4:] == ["", "", "", ""]  # Personal blank on write payload
+    for personal in ("Wow Factor", "Notes", "Visit Date", "Final Decision"):
+        assert row[HEADERS.index(personal)] == ""
+    assert row[HEADERS.index("Appreciation Potential")] == "High"
+    assert row[HEADERS.index("Rental Potential")] == "High"
 
     fixture = ROOT / "fixtures" / "sample_listing.txt"
     assert fixture.exists() and "100 Oak Street" in fixture.read_text(encoding="utf-8")

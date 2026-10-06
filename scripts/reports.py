@@ -40,6 +40,29 @@ def write_report_md(analysis: dict[str, Any], path: Path) -> None:
                 "",
             ]
         )
+    ra = s.get("regional_assessment")
+    if ra:
+        lines.extend(
+            [
+                "## Columbus accessibility",
+                f"- **Current transit:** {ra.get('current_transit')}/10 (Tier {ra.get('transit_tier')})",
+                f"- **Future transit investment:** {ra.get('future_transit_investment')}/10",
+                f"- **Transit appreciation potential:** {ra.get('transit_appreciation_potential')}/10",
+                f"- **Green / low-density:** {ra.get('green_low_density_quality')}/10",
+                f"- **Flood risk (10=low):** {ra.get('flood_risk')}/10",
+                f"- **Future catalyst:** {ra.get('future_transit_catalyst')}",
+                f"- **Multi-unit / income:** {ra.get('multi_unit_score')}/10 "
+                f"(Tier {ra.get('multi_unit_property_tier')})",
+                f"- **Owner-occupancy fit:** {ra.get('owner_occupancy_fit')}/10",
+                f"- **Trailer storage:** {ra.get('trailer_storage_score')}/10",
+                f"- **Combined investment fit:** {ra.get('combined_investment_fit')}/10",
+                "",
+                ra.get("future_transit_catalyst_note") or "",
+                "",
+                ra.get("final_strategy_answer") or "",
+                "",
+            ]
+        )
     lines.extend(
         [
             "## Strengths",

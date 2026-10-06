@@ -2,7 +2,7 @@
 
 ## Canonical source
 
-**[`strategy.md`](../strategy.md)** is the single source of truth for:
+**[`strategy.md`](../strategy.md)** is the single source of truth for **default** regions (e.g. New York, Chicago) and defines:
 
 - Category weights (YAML block at top)
 - Investment goal and philosophy
@@ -10,7 +10,9 @@
 - Category definitions and recommendation mapping
 - Score semantics
 
-**Do not duplicate weights or full criteria here.** Edit `strategy.md` when investment philosophy changes.
+**Regional overrides:** when `regions/<Sheet tab name>.md` exists (e.g. [`regions/Columbus.md`](../regions/Columbus.md)), that file supplies weights and scoring rules for analyses on that tab.
+
+**Do not duplicate weights or full criteria here.** Edit `strategy.md` (or the relevant `regions/*.md`) when investment philosophy changes.
 
 ---
 

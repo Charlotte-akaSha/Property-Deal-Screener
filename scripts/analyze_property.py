@@ -22,10 +22,15 @@ from utils import (
     get_gemini_client,
     image_parts_from_paths,
     image_parts_from_uploads,
+    load_columbus_transit_reference,
     load_prompt,
     load_schema,
-    load_strategy_raw,
+    COLUMBUS_REGION,
+    load_strategy_raw_for_region,
+    normalize_rent_fields,
     property_id_from_extracted,
+    resolve_sheet_tab,
+    scoring_files_for_region,
     strategy_rules_without_weights,
 )
 from transit_lookup import lookup_transit
@@ -33,14 +38,9 @@ from write_to_sheets import list_regions, upsert_analysis
 
 
 def _region_for_transit(sheet_tab: str | None) -> str:
-    if sheet_tab:
-        return sheet_tab
-    regions = list_regions()
-    if len(regions) == 1:
-        return regions[0]
-    raise ValueError(
-        "Region is required for transit lookup. Choose a region in the portal or pass --region."
-    )
+    if not sheet_tab:
+        raise ValueError("Region is required for transit lookup.")
+    return sheet_tab
 
 
 def extract_facts(
@@ -71,7 +71,7 @@ def extract_facts(
         extracted["link"] = link
     if not extracted.get("status"):
         extracted["status"] = "New"
-    return extracted
+    return normalize_rent_fields(extracted)
 
 
 def score_property(
@@ -79,12 +79,15 @@ def score_property(
     transit: dict[str, Any] | None = None,
     *,
     user_comments: str = "",
+    sheet_tab: str | None = None,
 ) -> dict[str, Any]:
     client = get_gemini_client()
-    schema = load_schema("scoring_schema.json")
-    prompt = load_prompt("scoring_prompt.md")
-    strategy = strategy_rules_without_weights(load_strategy_raw())
-    weights = parse_weights()
+    prompt_name, schema_name = scoring_files_for_region(sheet_tab)
+    schema = load_schema(schema_name)
+    prompt = load_prompt(prompt_name)
+    strategy_md = load_strategy_raw_for_region(sheet_tab)
+    strategy = strategy_rules_without_weights(strategy_md)
+    weights = parse_weights(strategy_md)
     payload = dict(extracted)
     if transit:
         payload["transit"] = transit
@@ -93,6 +96,11 @@ def score_property(
         "Extracted property facts (JSON):\n" + json.dumps(payload, indent=2),
         "Note: transit walk/train times are computed via Google Maps, not from the listing.",
     ]
+    if sheet_tab == COLUMBUS_REGION:
+        user_parts.insert(
+            1,
+            "Columbus transit corridor reference:\n" + load_columbus_transit_reference(),
+        )
     if user_comments.strip():
         user_parts.append(
             "User comments (investor notes — weigh alongside extracted facts when scoring):\n"
@@ -102,7 +110,7 @@ def score_property(
         client, system_prompt=prompt, user_parts=user_parts, schema=schema
     )
     overall = compute_overall(scored_raw["categories"], weights)
-    return {
+    result: dict[str, Any] = {
         "categories": scored_raw["categories"],
         "overall": overall,
         "overall_computed_from_weights": True,
@@ -113,6 +121,11 @@ def score_property(
         "red_flags": scored_raw.get("red_flags") or [],
         "rationale": scored_raw.get("rationale") or "",
     }
+    if scored_raw.get("regional_assessment"):
+        result["regional_assessment"] = scored_raw["regional_assessment"]
+    if sheet_tab:
+        result["region"] = sheet_tab
+    return result
 
 
 def save_listing_inputs(
@@ -160,6 +173,14 @@ def analyze_from_memory(
         user_comments=comments,
         image_uploads=image_uploads or [],
     )
+    regions = list_regions()
+    sheet_tab = resolve_sheet_tab(
+        extracted,
+        listing_text=listing_text,
+        link=link,
+        explicit=sheet_tab,
+        regions=regions,
+    )
     transit = lookup_transit(extracted, sheet_tab=_region_for_transit(sheet_tab))
     property_id = property_id_from_extracted(extracted, property_label)
     folder = ROOT / "properties" / property_id
@@ -170,7 +191,9 @@ def analyze_from_memory(
         user_comments=comments,
         image_uploads=image_uploads,
     )
-    scored = score_property(extracted, transit=transit, user_comments=comments)
+    scored = score_property(
+        extracted, transit=transit, user_comments=comments, sheet_tab=sheet_tab
+    )
     analysis = persist_local(
         folder,
         extracted=extracted,
@@ -218,9 +241,22 @@ def analyze_from_folder(
     extracted = extract_facts(
         text, link=link, user_comments=user_comments, image_paths=images
     )
+    regions = list_regions()
+    sheet_tab = resolve_sheet_tab(
+        extracted,
+        listing_text=text,
+        link=link,
+        explicit=sheet_tab,
+        regions=regions,
+    )
     property_id = folder.name
     transit = lookup_transit(extracted, sheet_tab=_region_for_transit(sheet_tab))
-    scored = score_property(extracted, transit=transit, user_comments=user_comments)
+    scored = score_property(
+        extracted,
+        transit=transit,
+        user_comments=user_comments,
+        sheet_tab=sheet_tab,
+    )
     analysis = persist_local(
         folder,
         extracted=extracted,

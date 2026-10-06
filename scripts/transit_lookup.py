@@ -26,12 +26,19 @@ TRANSIENT_MAPS_API_STATUSES = frozenset({"OVER_QUERY_LIMIT", "UNKNOWN_ERROR"})
 DEFAULT_CITY_CENTERS = {
     "New York": "Grand Central Terminal, New York, NY",
     "Chicago": "Millennium Station, Chicago, IL",
+    "Columbus": "Downtown Columbus, OH",
 }
+
+DEFAULT_OSU_DESTINATION = "Ohio State University, Columbus, OH"
 
 REGION_TIMEZONES = {
     "New York": "America/New_York",
     "Chicago": "America/Chicago",
+    "Columbus": "America/New_York",
 }
+
+COLUMBUS_REGION = "Columbus"
+BUS_STOP_TYPES = ("bus_stop", "transit_station")
 
 COMMUTE_WEEKDAY = 0  # Monday
 COMMUTE_HOUR = 8
@@ -258,11 +265,124 @@ def _transit_to_city_center(
     }
 
 
+def osu_destination_for_region(sheet_tab: str | None) -> str:
+    load_env()
+    if sheet_tab == COLUMBUS_REGION:
+        return os.getenv("CITY_CENTER_OSU_COLUMBUS", "").strip() or DEFAULT_OSU_DESTINATION
+    return ""
+
+
+def _find_nearest_bus_stop(lat: float, lng: float) -> dict[str, Any]:
+    """Nearest COTA-relevant stop (bus_stop or transit_station)."""
+    best: dict[str, Any] | None = None
+    best_dist = float("inf")
+    for place_type in BUS_STOP_TYPES:
+        data = _maps_request(
+            "place/nearbysearch",
+            {
+                "location": f"{lat},{lng}",
+                "rankby": "distance",
+                "type": place_type,
+            },
+        )
+        for place in data.get("results") or []:
+            loc = place["geometry"]["location"]
+            dist = _haversine_miles(lat, lng, float(loc["lat"]), float(loc["lng"]))
+            if dist < best_dist:
+                best_dist = dist
+                best = {
+                    "name": place.get("name", "Unknown stop"),
+                    "place_id": place.get("place_id"),
+                    "lat": float(loc["lat"]),
+                    "lng": float(loc["lng"]),
+                    "distance_miles": round(dist, 2),
+                    "stop_type": place_type,
+                }
+    if not best:
+        raise RuntimeError("No nearby bus or transit stop found for this address.")
+    return best
+
+
+def _count_transit_legs(route: dict[str, Any]) -> int:
+    legs = route.get("legs") or []
+    if not legs:
+        return 0
+    steps = legs[0].get("steps") or []
+    return sum(1 for step in steps if step.get("travel_mode") == "TRANSIT")
+
+
+def _transit_from_address(
+    origin_address: str,
+    destination: str,
+    *,
+    departure_time: int,
+) -> dict[str, Any]:
+    data = _maps_request(
+        "directions",
+        {
+            "origin": origin_address,
+            "destination": destination,
+            "mode": "transit",
+            "departure_time": departure_time,
+        },
+    )
+    routes = data.get("routes") or []
+    if not routes:
+        raise RuntimeError(f"No transit route found from property to {destination}.")
+    route = routes[0]
+    leg = route["legs"][0]
+    duration = leg["duration"]
+    transfers = max(0, _count_transit_legs(route) - 1)
+    return {
+        "text": duration["text"],
+        "minutes": max(1, int(round(duration["value"] / 60))),
+        "destination": destination,
+        "transfers": transfers,
+    }
+
+
+def lookup_transit_columbus(extracted: dict[str, Any], *, sheet_tab: str | None) -> dict[str, Any]:
+    """Walk to nearest bus stop; property → Downtown and property → OSU via Google Maps transit."""
+    address = format_property_address(extracted)
+    city_center = city_center_for_region(sheet_tab)
+    osu = osu_destination_for_region(sheet_tab)
+    lat, lng = geocode_address(address)
+    stop = _find_nearest_bus_stop(lat, lng)
+    walk = _walking_to_station(address, stop)
+    departure_unix, departure_label = _next_commute_departure(sheet_tab)
+    downtown = _transit_from_address(
+        address, city_center, departure_time=departure_unix
+    )
+    osu_trip = _transit_from_address(address, osu, departure_time=departure_unix)
+    total_minutes = downtown["minutes"]
+    return {
+        "nearest_station": stop["name"],
+        "nearest_stop": stop["name"],
+        "walk_to_station": walk["text"],
+        "walk_to_station_minutes": walk["minutes"],
+        "train_to_city_center": downtown["text"],
+        "train_to_city_center_minutes": downtown["minutes"],
+        "transit_to_osu": osu_trip["text"],
+        "transit_to_osu_minutes": osu_trip["minutes"],
+        "transfers_to_downtown": downtown["transfers"],
+        "transfers_to_osu": osu_trip["transfers"],
+        "total_to_city_center": downtown["text"],
+        "total_to_city_center_minutes": downtown["minutes"],
+        "train_departure_at": departure_label,
+        "city_center": city_center,
+        "osu_destination": osu,
+        "transit_mode": "cota_bus",
+        "source": "google_maps",
+    }
+
+
 def lookup_transit(extracted: dict[str, Any], *, sheet_tab: str | None) -> dict[str, Any]:
     """
     Compute walk time to nearest rail/transit station and train time to regional city center.
     Uses Google Maps APIs — independent of listing text.
     """
+    if sheet_tab == COLUMBUS_REGION:
+        return lookup_transit_columbus(extracted, sheet_tab=sheet_tab)
     address = format_property_address(extracted)
     city_center = city_center_for_region(sheet_tab)
     lat, lng = geocode_address(address)

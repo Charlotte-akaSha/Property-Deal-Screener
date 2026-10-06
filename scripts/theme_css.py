@@ -423,14 +423,71 @@ span[data-testid="stBadge"] {
 .pc-table-row:last-of-type { border-bottom: none; }
 .pc-table-row:hover { background: #FAFBFE; border-radius: 10px; }
 .pc-thumb {
-  width: 56px; height: 56px;
+  width: 48px; height: 48px;
   border-radius: 8px;
   object-fit: cover;
   background: #EEF0F6;
+  flex-shrink: 0;
+}
+.pc-thumb-empty { flex-shrink: 0; }
+.pc-sticky-prop {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  background: #fff;
+  padding-right: 10px;
+  margin-right: 2px;
+  box-shadow: 6px 0 10px -8px rgba(30, 35, 55, 0.35);
+}
+.pc-sticky-head {
+  z-index: 4;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--pc-muted);
+  box-shadow: none;
+  padding-right: 0;
+}
+.pc-sticky-prop-text {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.pc-sticky-prop-text .pc-prop-name,
+.pc-sticky-prop-text .pc-prop-link {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .pc-prop-name {
   font-weight: 600; color: var(--pc-text); font-size: 0.9rem; line-height: 1.25;
 }
+a.pc-prop-link {
+  color: var(--pc-text);
+  text-decoration: none;
+}
+a.pc-prop-link:hover {
+  color: var(--pc-accent);
+  text-decoration: underline;
+}
+.pc-kpi-sub-link {
+  display: block;
+  font-size: .72rem;
+  color: var(--pc-accent);
+  margin-top: 3px;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pc-kpi-sub-link:hover { text-decoration: underline; }
 .pc-prop-sub {
   color: var(--pc-muted); font-size: 0.75rem; margin-top: 2px;
 }
@@ -456,6 +513,35 @@ span[data-testid="stBadge"] {
 .pc-verdict-save { background: #E8F0FC; color: #3A6FC4; }
 .pc-verdict-reject { background: #F7E9EB; color: #B04E58; }
 .pc-verdict-other { background: #EEF0F6; color: #5A6278; }
+.pc-compare-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.pc-compare-head, .pc-compare-row {
+  display: grid;
+  grid-template-columns:
+    minmax(220px, 260px) minmax(96px, 0.9fr) 84px 72px 48px minmax(124px, 1fr)
+    70px 92px 108px minmax(120px, 1fr) 108px 78px 78px 58px 118px;
+  gap: 8px;
+  align-items: center;
+  min-width: 1620px;
+  padding: 8px 10px;
+}
+.pc-compare-head {
+  color: var(--pc-muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--pc-line);
+}
+.pc-compare-head > span { padding: 2px 0; }
+.pc-compare-row { border-bottom: 1px solid var(--pc-line); }
+.pc-compare-row:hover { background: #FAFBFE; }
+.pc-compare-row:hover .pc-sticky-prop { background: #FAFBFE; }
+.pc-flood-low { color: #2F7A6E; font-weight: 600; }
+.pc-flood-mod { color: #9A6B12; font-weight: 600; }
+.pc-flood-high { color: #B04E58; font-weight: 600; }
 .pc-table-foot {
   display: flex; justify-content: space-between; align-items: center;
   padding: 12px 20px 8px; color: var(--pc-muted); font-size: 0.8rem;
@@ -470,9 +556,38 @@ span[data-testid="stBadge"] {
 </style>
 """
 
+_FAVICON_SCRIPT = """
+<script>
+(function () {
+  const LIGHT = "/app/static/favicon-light.svg";
+  const DARK = "/app/static/favicon-dark.svg";
+  function pickHref() {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? DARK : LIGHT;
+  }
+  function applyFavicon() {
+    const href = pickHref();
+    let link = document.querySelector('link[data-pc-adaptive-favicon="1"]');
+    if (!link) {
+      link = document.createElement("link");
+      link.rel = "icon";
+      link.type = "image/svg+xml";
+      link.setAttribute("data-pc-adaptive-favicon", "1");
+      document.head.appendChild(link);
+    }
+    if (link.getAttribute("href") !== href) {
+      link.setAttribute("href", href);
+    }
+  }
+  applyFavicon();
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyFavicon);
+})();
+</script>
+"""
+
 
 def inject() -> None:
     st.html(_CSS)
+    st.html(_FAVICON_SCRIPT, unsafe_allow_javascript=True)
 
 
 def card(key: str, **kwargs):
@@ -503,12 +618,28 @@ def hero(title: str, subtitle: str, icon: str = "dashboard", accent: str = "viol
     )
 
 
-def _kpi_html(label: str, value: str, icon: str, accent: str = "violet", sub: str = "") -> str:
-    sub_html = (
-        f'<div class="pc-kpi-sub" title="{_html.escape(sub)}">{_html.escape(sub)}</div>'
-        if sub
-        else ""
-    )
+def _kpi_html(
+    label: str,
+    value: str,
+    icon: str,
+    accent: str = "violet",
+    sub: str = "",
+    sub_link: str = "",
+) -> str:
+    if sub and sub_link and (
+        sub_link.startswith("http://") or sub_link.startswith("https://")
+    ):
+        sub_html = (
+            f'<a class="pc-kpi-sub-link" href="{_html.escape(sub_link)}" '
+            f'target="_blank" rel="noopener noreferrer" title="{_html.escape(sub)}">'
+            f"{_html.escape(sub)}</a>"
+        )
+    elif sub:
+        sub_html = (
+            f'<div class="pc-kpi-sub" title="{_html.escape(sub)}">{_html.escape(sub)}</div>'
+        )
+    else:
+        sub_html = ""
     return f"""
         <div class="pc-kpi">
           <div class="pc-kpi-icon" style="{_icon_style(accent)}">
@@ -527,7 +658,10 @@ def kpi(label: str, value: str, icon: str, accent: str = "violet", sub: str = ""
     st.html(_kpi_html(label, value, icon, accent, sub))
 
 
-def kpi_grid(cards: list[tuple[str, str, str, str, str]], min_width: str = "168px") -> None:
+def kpi_grid(
+    cards: list[tuple[str, str, str, str, str] | tuple[str, str, str, str, str, str]],
+    min_width: str = "168px",
+) -> None:
     inner = "".join(_kpi_html(*card) for card in cards)
     st.html(
         f'<div class="pc-kpi-grid" style="grid-template-columns:'
@@ -563,6 +697,10 @@ def table_header(columns: list[str]) -> None:
 def verdict_class(verdict: str) -> str:
     return {
         "Worth visiting": "pc-verdict-visit",
+        "Strong candidate": "pc-verdict-visit",
+        "Buy": "pc-verdict-visit",
         "Save": "pc-verdict-save",
+        "Investigate": "pc-verdict-save",
         "Reject": "pc-verdict-reject",
+        "Pass": "pc-verdict-reject",
     }.get(verdict, "pc-verdict-other")

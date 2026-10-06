@@ -29,11 +29,18 @@ from sheets_data import (  # noqa: E402
     load_properties,
     save_personal_edits,
 )
-from ui_helpers import bullets_to_list, format_currency, render_bullet_list  # noqa: E402
+from ui_helpers import (  # noqa: E402
+    bullets_to_list,
+    format_currency,
+    normalize_listing_url,
+    property_title_html,
+    render_bullet_list,
+)
 from write_to_sheets import list_regions, sheet_url  # noqa: E402
 
 RECOMMENDATIONS = ["Reject", "Save", "Worth visiting"]
 FINAL_DECISIONS = ["Pursue", "Maybe", "Pass", "Visited", "Offer made"]
+ALL_PROPERTIES_TAB = "All properties"
 CHART_HEIGHT = 300
 
 REC_COLORS = {
@@ -57,8 +64,13 @@ COMPARE_COLUMNS = [
 NOTES_COLUMNS = ["Property ID", "Region", "_sheet_row", *PERSONAL_COLUMN_LIST]
 
 
+def _sheets_cache_generation() -> int:
+    return int(st.session_state.get("sheets_cache_generation", 0))
+
+
 @st.cache_data(ttl="10m", show_spinner="Loading properties from Google Sheets…")
-def cached_load_properties(regions: tuple[str, ...]) -> pd.DataFrame:
+def cached_load_properties(regions: tuple[str, ...], _generation: int) -> pd.DataFrame:
+    del _generation  # bust cache when generation bumps after Analyze / Refresh
     return load_properties(list(regions))
 
 
@@ -132,6 +144,19 @@ def render_kpis(df: pd.DataFrame) -> None:
 
 
 def render_property_dialog(row: pd.Series) -> None:
+    link = normalize_listing_url(row.get("Link"))
+    title = readable_property_name(row["Property ID"])
+    if link:
+        st.link_button(
+            title,
+            link,
+            icon=":material/open_in_new:",
+            width="stretch",
+        )
+    else:
+        st.markdown(f"**{html.escape(title)}**")
+        st.caption("No listing URL on file — re-analyze with the Zillow link filled in.")
+
     photo_path = find_property_photo(str(row["Property ID"]))
     if photo_path is not None:
         left, right = st.columns([1.1, 1.4], gap="large")
@@ -209,11 +234,17 @@ def render_property_dialog(row: pd.Series) -> None:
         with theme_css.card("d_transit"):
             theme_css.section("Commute", "directions_transit", "blue")
             for label, key in [
-                ("Walk to station", "Walk to Station"),
-                ("Train to city center", "Train to City Center"),
-                ("Total door to door", "Total to City Center"),
+                ("Walk to stop / station", "Walk to Station"),
+                ("Transit to Downtown", "Train to City Center"),
+                ("Door to door (Downtown)", "Total to City Center"),
             ]:
                 st.markdown(f"**{label}**  \n{row.get(key) or '—'}")
+            plan = str(row.get("Transit Plan Detail") or "").strip()
+            if plan:
+                st.markdown("**Future transit (research)**")
+                st.markdown(plan)
+            elif str(row.get("Future Transit") or "").strip():
+                st.caption(f"Future: {row.get('Future Transit')}")
             if row.get("Link"):
                 st.link_button("Open listing", str(row["Link"]), icon=":material/open_in_new:")
 
@@ -241,71 +272,109 @@ def render_compare_table(df: pd.DataFrame) -> None:
         return
 
     ranked = df.sort_values("Overall", ascending=False, na_position="last").reset_index(drop=True)
+    headers = [
+        "Property",
+        "Location",
+        "Price",
+        "HOA / mo",
+        "Units",
+        "Est. gross rent",
+        "Est. net yield",
+        "Garage / trailer",
+        "Flood risk",
+        "Current transit",
+        "Future transit",
+        "Appreciation",
+        "Rental",
+        "Match",
+        "Verdict",
+    ]
 
     with theme_css.card("table"):
-        theme_css.table_header(
-            ["", "Property", "Location", "Asking price", "Gross yield", "Match score", "Verdict"]
+        st.caption(
+            "Est. net yield is (annual rent − taxes − insurance − HOA×12) ÷ price. "
+            "Re-analyze a listing to fill HOA, units, flood risk, and future transit."
         )
-
-        for idx, row in ranked.iterrows():
+        head_cells = [
+            f'<div class="pc-sticky-prop pc-sticky-head">{html.escape(headers[0])}</div>',
+            *[f"<span>{html.escape(label)}</span>" for label in headers[1:]],
+        ]
+        head = "".join(head_cells)
+        bodies: list[str] = []
+        for _, row in ranked.iterrows():
             thumb = ensure_thumbnail(str(row["Property ID"]))
-            name = html.escape(readable_property_name(row["Property ID"]))
-            location = html.escape(f"{row.get('City', '')}, {row.get('State', '')}".strip(" ,"))
-            region = html.escape(str(row.get("Region") or ""))
-            commute = num(row.get("Commute (min)"))
-            verdict = str(row.get("Recommendation") or "—")
+            name_html = property_title_html(
+                readable_property_name(row["Property ID"]), row.get("Link")
+            )
+            location = html.escape(
+                f"{row.get('City', '')}, {row.get('State', '')}".strip(" ,") or "—"
+            )
+            verdict = str(row.get("Verdict") or "—")
+            match = row.get("Match /100")
+            match_label = f"{float(match):.0f}" if pd.notna(match) else "—"
             score = float(row["Overall"]) if pd.notna(row.get("Overall")) else 0.0
             score_pct = int(min(max(score / 10.0, 0.0), 1.0) * 100)
             vclass = theme_css.verdict_class(verdict)
-            thumb_html = (
+            flood = str(row.get("Flood") or "—")
+            flood_class = {
+                "🟢 Low": "pc-flood-low",
+                "🟡 Moderate": "pc-flood-mod",
+                "🔴 High": "pc-flood-high",
+            }.get(flood, "")
+            thumb_inner = (
                 f'<img class="pc-thumb" src="/app/static/property_thumbs/{html.escape(thumb.name)}" alt="" />'
                 if thumb is not None
-                else '<div class="pc-thumb"></div>'
+                else '<div class="pc-thumb pc-thumb-empty"></div>'
             )
-            commute_html = (
-                f'<div class="pc-prop-sub">{html.escape(commute)} min to city</div>'
-                if commute != "—"
-                else ""
+            sticky_prop = (
+                f'<div class="pc-sticky-prop">{thumb_inner}'
+                f'<div class="pc-sticky-prop-text">{name_html}'
+                f"<div class='pc-prop-sub'>{html.escape(str(row.get('Region') or ''))}</div>"
+                f"</div></div>"
             )
-
-            row_cols = st.columns([11.5, 0.7], gap="small", vertical_alignment="center")
-            with row_cols[0]:
-                st.html(
-                    f"""
-                    <div class="pc-table-row" style="padding-left:8px;padding-right:0;grid-template-columns:72px minmax(160px,1.6fr) minmax(110px,1fr) 100px 90px 120px 130px">
-                      {thumb_html}
-                      <div>
-                        <div class="pc-prop-name">{name}</div>
-                        <div class="pc-prop-sub">{region}</div>
-                      </div>
-                      <div>
-                        <div class="pc-cell">{location or '—'}</div>
-                        {commute_html}
-                      </div>
-                      <div class="pc-cell-strong">${html.escape(num(row.get('Price')))}</div>
-                      <div class="pc-cell-strong">{html.escape(num(row.get('Gross yield %'), '{:.1f}'))}%</div>
-                      <div class="pc-match">
-                        <div class="pc-match-val">{score:.1f}</div>
-                        <div class="pc-match-bar"><div class="pc-match-fill" style="width:{score_pct}%"></div></div>
-                      </div>
-                      <div><span class="pc-verdict {vclass}">{html.escape(verdict)}</span></div>
-                    </div>
-                    """
-                )
-            with row_cols[1]:
-                if st.button(
-                    "",
-                    key=f"open_prop_{idx}",
-                    icon=":material/more_vert:",
-                    help="Open details",
-                ):
-                    st.session_state["compare_detail_id"] = str(row["Property ID"])
-
+            net = row.get("Est. net yield %")
+            net_label = f"{float(net):.1f}%" if pd.notna(net) else "—"
+            hoa_label = format_currency(row.get("HOA"))
+            if hoa_label in ("$0", "—"):
+                hoa_label = "—"
+            pid = html.escape(str(row["Property ID"]))
+            cells = [
+                sticky_prop,
+                f"<div class='pc-cell'>{location}</div>",
+                f"<div class='pc-cell-strong'>${html.escape(num(row.get('Price')))}</div>",
+                f"<div class='pc-cell'>{html.escape(hoa_label)}</div>",
+                f"<div class='pc-cell'>{html.escape(str(row.get('Units') or '—'))}</div>",
+                f"<div class='pc-cell'>{html.escape(str(row.get('Gross rent label') or '—'))}</div>",
+                f"<div class='pc-cell-strong'>{html.escape(net_label)}</div>",
+                f"<div class='pc-cell'>{html.escape(str(row.get('Trailer') or '—'))}</div>",
+                f"<div class='pc-cell {flood_class}'>{html.escape(flood)}</div>",
+                f"<div class='pc-cell'>{html.escape(str(row.get('Transit now') or '—'))}</div>",
+                f"<div class='pc-cell'>{html.escape(str(row.get('Transit future') or '—'))}</div>",
+                f"<div class='pc-cell'>{html.escape(str(row.get('Appreciation label') or '—'))}</div>",
+                f"<div class='pc-cell'>{html.escape(str(row.get('Rental potential') or '—'))}</div>",
+                (
+                    "<div class='pc-match'>"
+                    f"<div class='pc-match-val'>{html.escape(match_label)}</div>"
+                    f"<div class='pc-match-bar'><div class='pc-match-fill' style='width:{score_pct}%'></div></div>"
+                    "</div>"
+                ),
+                (
+                    f"<div><span class='pc-verdict {vclass}'>{html.escape(verdict)}</span>"
+                    f"<div class='pc-prop-sub'><a href='?detail={pid}'>Details</a></div></div>"
+                ),
+            ]
+            bodies.append(f'<div class="pc-compare-row">{"".join(cells)}</div>')
+        st.html(
+            '<div class="pc-compare-wrap">'
+            f'<div class="pc-compare-head">{head}</div>'
+            + "".join(bodies)
+            + "</div>"
+        )
         st.html(
             f'<div class="pc-table-foot"><span>Showing {len(ranked)} of {len(ranked)} properties</span></div>'
         )
 
-    detail_id = st.session_state.get("compare_detail_id")
+    detail_id = st.query_params.get("detail") or st.session_state.get("compare_detail_id")
     if detail_id:
         match = ranked[ranked["Property ID"] == detail_id]
         if not match.empty:
@@ -316,6 +385,7 @@ def render_compare_table(df: pd.DataFrame) -> None:
                 render_property_dialog(detail_row)
                 if st.button("Close", key="close_compare_detail"):
                     st.session_state.pop("compare_detail_id", None)
+                    st.query_params.pop("detail", None)
                     st.rerun()
 
             show_detail()
@@ -713,7 +783,7 @@ theme_css.hero(
 all_regions = list_regions()
 
 try:
-    raw = cached_load_properties(tuple(all_regions))
+    raw = cached_load_properties(tuple(all_regions), _sheets_cache_generation())
 except Exception as exc:  # noqa: BLE001
     st.error(f"Could not load your Google Sheet: {exc}", icon=":material/cloud_off:")
     st.link_button("Open Google Sheets", sheet_url(), icon=":material/open_in_new:")
@@ -727,11 +797,43 @@ if raw.empty:
     st.link_button("Open Google Sheets", sheet_url(), icon=":material/open_in_new:")
     st.stop()
 
+region_tab_labels = [*all_regions, ALL_PROPERTIES_TAB]
+_region_counts = raw.groupby("Region", sort=False).size().to_dict()
+
+def _region_segment_label(name: str) -> str:
+    if name == ALL_PROPERTIES_TAB:
+        return f"All properties ({len(raw)})"
+    return f"{name} ({_region_counts.get(name, 0)})"
+
+
+if st.session_state.get("compare_active_region") not in region_tab_labels:
+    st.session_state["compare_active_region"] = ALL_PROPERTIES_TAB
+
+active_region = st.segmented_control(
+    "Market",
+    options=region_tab_labels,
+    format_func=_region_segment_label,
+    key="compare_active_region",
+    label_visibility="collapsed",
+)
+
+if active_region == ALL_PROPERTIES_TAB:
+    scope = raw
+else:
+    scope = raw[raw["Region"] == active_region].copy()
+    if scope.empty:
+        st.info(
+            f"No rows on the **{active_region}** Google Sheet tab yet (or the list is stale). "
+            "Re-run **Analyze** with a Columbus address, confirm **Save to Google Sheets** is on, "
+            "then use **Refresh from Sheets** in the sidebar.",
+            icon=":material/info:",
+        )
+
 with st.sidebar:
     theme_css.section("Filters", "apartment", "violet")
-    region_filter = st.multiselect("Regions", options=all_regions, default=all_regions)
+    st.caption(f"Viewing: **{active_region}**")
 
-    prices = raw["Price"].dropna()
+    prices = scope["Price"].dropna()
     if not prices.empty and prices.max() > prices.min():
         price_min, price_max = st.slider(
             "Price range",
@@ -767,12 +869,15 @@ with st.sidebar:
         icon=":material/open_in_new:", width="stretch",
     )
     if st.button("Refresh from Sheets", icon=":material/sync:", width="stretch"):
+        st.session_state["sheets_cache_generation"] = (
+            st.session_state.get("sheets_cache_generation", 0) + 1
+        )
         cached_load_properties.clear()
         st.rerun()
 
 filtered = apply_filters(
-    raw,
-    regions=region_filter,
+    scope,
+    regions=[],
     recommendations=rec_selected,
     price_range=(price_min, price_max),
     min_overall=min_overall,
@@ -780,15 +885,15 @@ filtered = apply_filters(
     min_beds=min_beds,
 )
 
-active_chips = list(region_filter or [])
+active_chips: list[str] = []
 if min_overall > 0:
     active_chips.append(f"Match ≥ {min_overall:g}")
 if max_commute is not None:
     active_chips.append(f"≤ {int(max_commute)} min")
 if min_beds > 0:
     active_chips.append(f"{min_beds}+ beds")
-active_chips.append(f"{len(filtered)} properties")
-theme_css.chips(active_chips)
+if active_chips:
+    theme_css.chips(active_chips)
 
 render_kpis(filtered)
 st.space("small")
@@ -825,4 +930,4 @@ if tab_h2h.open:
 
 if tab_notes.open:
     with tab_notes:
-        render_notes_tab(filtered, raw)
+        render_notes_tab(filtered, scope)

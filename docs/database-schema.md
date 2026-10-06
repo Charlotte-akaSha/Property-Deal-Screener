@@ -75,12 +75,10 @@ Google Sheets is the **CURRENT** shared data store and a **TEMPORARY BRIDGE** un
 
 ### Extraction vs Sheets field gap
 
-`schema/extraction_schema.json` includes **`address`**, **`hoa`**, and **`status`**, but `write_to_sheets.py` `HEADERS` has **no dedicated columns** for these fields.
+`schema/extraction_schema.json` includes **`address`** and **`status`**, which are **not** separate Sheet columns.
 
-- Gemini **can** extract them (extraction supports them).
-- They are **not** currently persisted as separate Google Sheets columns.
-- `address` is reflected indirectly via Property ID slug; `hoa` and `status` live in extraction JSON / local `analysis_*.json` only.
-- This is an **implementation / data-model gap**, not missing extraction support.
+- **`HOA`** (monthly, from extraction `hoa`) is persisted in the **HOA** column after **Taxes**.
+- `address` is reflected indirectly via Property ID slug; `status` lives in extraction JSON / local `analysis_*.json` only.
 
 ### Upsert behavior
 

@@ -32,7 +32,7 @@ Target user time per analysis: under ~2 minutes (excluding API latency) — per 
 | User comments | No | Included in extraction and scoring |
 | Photos | No | Max 5 images (png, jpg, webp, gif) |
 | Property label override | No | Replaces address-derived Property ID |
-| Region (Sheet tab) | Yes when multiple regions | e.g. New York, Chicago |
+| Sheet tab | Auto from city/state after extraction | Optional override under **Advanced** |
 
 ### Processing
 

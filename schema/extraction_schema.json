@@ -15,8 +15,10 @@
     "hoa",
     "estimated_insurance",
     "estimated_rent",
+    "gross_annual_income",
     "bedrooms",
     "bathrooms",
+    "legal_units",
     "house_sqft",
     "lot_sqft",
     "year_built",
@@ -28,7 +30,10 @@
     "sewer",
     "internet",
     "condition_notes",
-    "flood_zone_notes"
+    "flood_zone_notes",
+    "rental_units_notes",
+    "garage_trailer_notes",
+    "zoning_hoa_notes"
   ],
   "properties": {
     "address": { "type": "string" },
@@ -43,8 +48,10 @@
     "hoa": { "type": ["number", "null"] },
     "estimated_insurance": { "type": ["number", "null"] },
     "estimated_rent": { "type": ["number", "null"] },
+    "gross_annual_income": { "type": ["number", "null"] },
     "bedrooms": { "type": ["number", "null"] },
     "bathrooms": { "type": ["number", "null"] },
+    "legal_units": { "type": ["number", "null"] },
     "house_sqft": { "type": ["number", "null"] },
     "lot_sqft": { "type": ["number", "null"] },
     "year_built": { "type": ["number", "null"] },
@@ -56,6 +63,9 @@
     "sewer": { "type": "string" },
     "internet": { "type": "string" },
     "condition_notes": { "type": "string" },
-    "flood_zone_notes": { "type": "string" }
+    "flood_zone_notes": { "type": "string" },
+    "rental_units_notes": { "type": "string" },
+    "garage_trailer_notes": { "type": "string" },
+    "zoning_hoa_notes": { "type": "string" }
   }
 }

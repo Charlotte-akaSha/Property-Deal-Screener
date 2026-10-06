@@ -32,8 +32,10 @@ HEADERS = [
     "Price",
     "Price/sqft",
     "Taxes",
+    "HOA",
     "Estimated Insurance",
     "Estimated Rent",
+    "Gross Annual Income",
     "House Size",
     "Land Size",
     "Bedrooms",
@@ -67,10 +69,29 @@ HEADERS = [
     "Notes",
     "Visit Date",
     "Final Decision",
+    "Legal Units",
+    "Trailer Fit",
+    "Flood Risk",
+    "Current Transit",
+    "Future Transit",
+    "Transit Plan Detail",
+    "Appreciation Potential",
+    "Rental Potential",
 ]
 
-PERSONAL_HEADERS = {"Wow Factor", "Notes", "Visit Date", "Final Decision"}
-UPDATABLE_COUNT = len(HEADERS) - len(PERSONAL_HEADERS)
+PERSONAL_COLUMN_LIST = ["Wow Factor", "Notes", "Visit Date", "Final Decision"]
+PERSONAL_HEADERS = set(PERSONAL_COLUMN_LIST)
+COMPARE_COLUMN_LIST = [
+    "Legal Units",
+    "Trailer Fit",
+    "Flood Risk",
+    "Current Transit",
+    "Future Transit",
+    "Transit Plan Detail",
+    "Appreciation Potential",
+    "Rental Potential",
+]
+UPDATABLE_COUNT = HEADERS.index("Wow Factor")
 
 
 def _service_account_path() -> Path:
@@ -83,13 +104,37 @@ def _service_account_path() -> Path:
 
 
 def list_regions() -> list[str]:
-    """Regional tabs configured in .env (comma-separated)."""
+    """Regional tabs from .env plus any regions/<Name>.md strategy files."""
     load_env()
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add(name: str) -> None:
+        n = name.strip()
+        if n and n not in seen:
+            seen.add(n)
+            names.append(n)
+
     raw = os.getenv("GOOGLE_SHEETS_REGIONS", "").strip()
     if raw:
-        return [name.strip() for name in raw.split(",") if name.strip()]
-    default = os.getenv("GOOGLE_SHEETS_TAB", "Properties").strip() or "Properties"
-    return [default]
+        for part in raw.split(","):
+            add(part)
+    else:
+        default = os.getenv("GOOGLE_SHEETS_TAB", "Properties").strip() or "Properties"
+        add(default)
+
+    regions_dir = ROOT / "regions"
+    if regions_dir.is_dir():
+        for path in sorted(regions_dir.glob("*.md")):
+            if path.name.startswith("columbus_"):
+                continue
+            add(path.stem)
+
+    columbus_strategy = regions_dir / "Columbus.md"
+    if columbus_strategy.is_file():
+        add("Columbus")
+
+    return names
 
 
 def open_worksheet(sheet_tab: str | None = None):
@@ -151,8 +196,10 @@ def analysis_to_row(analysis: dict[str, Any]) -> list[Any]:
         "Price": e.get("price"),
         "Price/sqft": e.get("price_per_sqft"),
         "Taxes": e.get("taxes"),
+        "HOA": e.get("hoa"),
         "Estimated Insurance": e.get("estimated_insurance"),
         "Estimated Rent": e.get("estimated_rent"),
+        "Gross Annual Income": e.get("gross_annual_income"),
         "House Size": e.get("house_sqft"),
         "Land Size": e.get("lot_sqft"),
         "Bedrooms": e.get("bedrooms"),
@@ -186,8 +233,111 @@ def analysis_to_row(analysis: dict[str, Any]) -> list[Any]:
         "Notes": "",
         "Visit Date": "",
         "Final Decision": "",
+        **_compare_fields(e, s, t),
     }
     return [by_header[h] for h in HEADERS]
+
+
+def _band_high_medium_low(score: object) -> str:
+    try:
+        value = float(score)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if value >= 7.5:
+        return "High"
+    if value >= 5:
+        return "Medium"
+    return "Low"
+
+
+def _flood_label(score: object) -> str:
+    """10 = very low flood exposure."""
+    try:
+        value = float(score)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if value >= 7.5:
+        return "Low"
+    if value >= 5:
+        return "Moderate"
+    return "High"
+
+
+def _trailer_fit(score: object, garage: str) -> str:
+    try:
+        value = float(score)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        value = None
+    if value is not None:
+        if value >= 8:
+            return "Yes"
+        if value >= 6:
+            return "Maybe"
+        if value >= 3:
+            return "Buildable"
+        return "No"
+    text = (garage or "").lower()
+    if not text or text in {"none", "no", "n/a", "—"}:
+        return "No"
+    if any(word in text for word in ("rv", "carport", "oversized", "detached", "2-car", "3-car", "two-car", "three-car")):
+        return "Maybe"
+    if "garage" in text:
+        return "Maybe"
+    return ""
+
+
+def _future_transit_label(catalyst: str, note: str) -> str:
+    blob = f"{catalyst} {note}".lower()
+    if "under construction" in blob:
+        return "Under construction"
+    mapping = {
+        "none identified": "None",
+        "speculative": "Possible",
+        "possible": "Possible",
+        "positive": "Planned",
+        "major catalyst": "Funded",
+    }
+    return mapping.get((catalyst or "").strip().lower(), "")
+
+
+def _current_transit_label(transit: dict[str, Any], location_score: object) -> str:
+    quality = _band_high_medium_low(location_score)
+    quality_word = {"High": "Strong", "Medium": "Fair", "Low": "Weak"}.get(quality, "")
+    minutes = transit.get("walk_to_station_minutes")
+    if quality_word and minutes:
+        return f"{quality_word} · {int(minutes)} min walk"
+    if quality_word:
+        return quality_word
+    return ""
+
+
+def _compare_fields(
+    extracted: dict[str, Any],
+    scored: dict[str, Any],
+    transit: dict[str, Any],
+) -> dict[str, Any]:
+    regional = scored.get("regional_assessment") or {}
+    categories = scored.get("categories") or {}
+    return {
+        "Legal Units": extracted.get("legal_units"),
+        "Trailer Fit": _trailer_fit(
+            regional.get("trailer_storage_score"),
+            str(extracted.get("garage") or ""),
+        ),
+        "Flood Risk": _flood_label(regional.get("flood_risk")),
+        "Current Transit": _current_transit_label(transit, categories.get("location")),
+        "Future Transit": _future_transit_label(
+            str(regional.get("future_transit_catalyst") or ""),
+            str(regional.get("future_transit_catalyst_note") or ""),
+        ),
+        "Transit Plan Detail": str(
+            regional.get("future_transit_detail")
+            or regional.get("future_transit_catalyst_note")
+            or ""
+        ).strip(),
+        "Appreciation Potential": _band_high_medium_low(categories.get("appreciation")),
+        "Rental Potential": _band_high_medium_low(categories.get("rental")),
+    }
 
 
 def find_row_by_property_id(ws, property_id: str) -> int | None:
@@ -213,14 +363,24 @@ def upsert_analysis(analysis: dict[str, Any], sheet_tab: str | None = None) -> d
             "sheet_tab": ws.title,
             "sheet_url": sheet_url(),
         }
-    # Update only non-personal columns; leave Personal columns untouched
-    updatable = row[:UPDATABLE_COUNT]
+    # Update non-personal columns; leave Wow Factor / Notes / Visit Date / Final Decision untouched.
+    prefix = row[:UPDATABLE_COUNT]
     end_col = gspread.utils.rowcol_to_a1(1, UPDATABLE_COUNT).replace("1", "")
     ws.update(
         range_name=f"A{existing}:{end_col}{existing}",
-        values=[updatable],
+        values=[prefix],
         value_input_option="USER_ENTERED",
     )
+    tail_start = HEADERS.index(COMPARE_COLUMN_LIST[0]) + 1
+    tail = row[tail_start - 1 :]
+    if tail:
+        start_cell = gspread.utils.rowcol_to_a1(existing, tail_start)
+        end_cell = gspread.utils.rowcol_to_a1(existing, len(HEADERS))
+        ws.update(
+            range_name=f"{start_cell}:{end_cell}",
+            values=[tail],
+            value_input_option="USER_ENTERED",
+        )
     return {
         "action": "update",
         "property_id": property_id,

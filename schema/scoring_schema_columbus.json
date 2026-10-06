@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "categories",
+    "recommendation",
+    "strengths",
+    "weaknesses",
+    "red_flags",
+    "questions_to_ask",
+    "rationale",
+    "regional_assessment"
+  ],
+  "properties": {
+    "categories": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "financial",
+        "location",
+        "property",
+        "appreciation",
+        "rental",
+        "management",
+        "lifestyle",
+        "climate",
+        "risk"
+      ],
+      "properties": {
+        "financial": { "type": "number", "minimum": 0, "maximum": 10 },
+        "location": { "type": "number", "minimum": 0, "maximum": 10 },
+        "property": { "type": "number", "minimum": 0, "maximum": 10 },
+        "appreciation": { "type": "number", "minimum": 0, "maximum": 10 },
+        "rental": { "type": "number", "minimum": 0, "maximum": 10 },
+        "management": { "type": "number", "minimum": 0, "maximum": 10 },
+        "lifestyle": { "type": "number", "minimum": 0, "maximum": 10 },
+        "climate": { "type": "number", "minimum": 0, "maximum": 10 },
+        "risk": { "type": "number", "minimum": 0, "maximum": 10 }
+      }
+    },
+    "recommendation": {
+      "type": "string",
+      "enum": ["Reject", "Save", "Worth visiting"]
+    },
+    "strengths": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "weaknesses": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "red_flags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "questions_to_ask": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "rationale": { "type": "string" },
+    "regional_assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current_transit",
+        "future_transit_investment",
+        "transit_appreciation_potential",
+        "green_low_density_quality",
+        "flood_risk",
+        "overall_climate_resilience",
+        "car_independence",
+        "overall_accessibility_score",
+        "transit_tier",
+        "future_transit_catalyst",
+        "multi_unit_score",
+        "multi_unit_property_tier",
+        "owner_occupancy_fit",
+        "trailer_storage_score",
+        "combined_investment_fit",
+        "why_attractive",
+        "main_risks",
+        "future_transit_catalyst_note",
+        "future_transit_detail",
+        "final_strategy_answer"
+      ],
+      "properties": {
+        "current_transit": { "type": "number", "minimum": 0, "maximum": 10 },
+        "future_transit_investment": { "type": "number", "minimum": 0, "maximum": 10 },
+        "transit_appreciation_potential": { "type": "number", "minimum": 0, "maximum": 10 },
+        "green_low_density_quality": { "type": "number", "minimum": 0, "maximum": 10 },
+        "flood_risk": { "type": "number", "minimum": 0, "maximum": 10 },
+        "overall_climate_resilience": { "type": "number", "minimum": 0, "maximum": 10 },
+        "car_independence": { "type": "number", "minimum": 0, "maximum": 10 },
+        "overall_accessibility_score": { "type": "number", "minimum": 0, "maximum": 10 },
+        "transit_tier": {
+          "type": "string",
+          "enum": ["A", "B", "C", "D"]
+        },
+        "future_transit_catalyst": {
+          "type": "string",
+          "enum": [
+            "Major catalyst",
+            "Positive",
+            "Possible",
+            "Speculative",
+            "None identified"
+          ]
+        },
+        "why_attractive": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "main_risks": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "future_transit_catalyst_note": { "type": "string" },
+        "future_transit_detail": { "type": "string" },
+        "multi_unit_score": { "type": "number", "minimum": 0, "maximum": 10 },
+        "multi_unit_property_tier": {
+          "type": "string",
+          "enum": ["A", "B", "C", "N/A"]
+        },
+        "owner_occupancy_fit": { "type": "number", "minimum": 0, "maximum": 10 },
+        "trailer_storage_score": { "type": "number", "minimum": 0, "maximum": 10 },
+        "combined_investment_fit": { "type": "number", "minimum": 0, "maximum": 10 },
+        "final_strategy_answer": { "type": "string" }
+      }
+    }
+  }
+}

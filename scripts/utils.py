@@ -25,7 +25,8 @@ TRANSIENT_API_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def load_env() -> None:
-    load_dotenv(ROOT / ".env")
+    # override=True so edits to .env apply without restarting Streamlit
+    load_dotenv(ROOT / ".env", override=True)
 
 
 def get_model_name() -> str:
@@ -56,6 +57,141 @@ def load_strategy_raw() -> str:
     return read_text(ROOT / "strategy.md")
 
 
+COLUMBUS_REGION = "Columbus"
+
+# Keyword hints for infer_sheet_tab (region name must match a configured Sheet tab).
+_REGION_LOCATION_HINTS: dict[str, list[tuple[str, int]]] = {
+    "Columbus": [
+        (r"\bcolumbus\b", 50),
+        (
+            r"\b(dublin|westerville|hilliard|gahanna|bexley|upper arlington|grove city|"
+            r"reynoldsburg|pickerington|powell|lewis center|worthington|new albany)\b",
+            28,
+        ),
+        (r",\s*oh\b", 18),
+        (r"\bohio\b", 8),
+        (r"\b43[0-2]\d\b", 12),
+    ],
+    "New York": [
+        (r"\bnew york\b", 50),
+        (r"\bnyc\b", 50),
+        (
+            r"\b(brooklyn|queens|bronx|manhattan|staten island|long island|"
+            r"westchester|yonkers|hoboken|jersey city)\b",
+            40,
+        ),
+        (r",\s*ny\b", 15),
+        (r"\bnew york,\s*ny\b", 25),
+    ],
+    "Chicago": [
+        (r"\bchicago\b", 50),
+        (r"\b(evanston|oak park|skokie|naperville|schaumburg|wheaton)\b", 28),
+        (r",\s*il\b", 15),
+        (r"\billinois\b", 8),
+    ],
+}
+
+
+def _normalize_place_name(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def infer_sheet_tab(
+    extracted: dict[str, Any],
+    *,
+    listing_text: str = "",
+    link: str = "",
+    regions: list[str],
+) -> str:
+    """Pick a Google Sheet tab from extracted location + listing context."""
+    if not regions:
+        raise ValueError("No Sheet regions configured (GOOGLE_SHEETS_REGIONS or regions/*.md).")
+    if len(regions) == 1:
+        return regions[0]
+
+    city = (extracted.get("city") or "").strip()
+    state = (extracted.get("state") or "").strip()
+    blob = " ".join(
+        [
+            str(extracted.get("address") or ""),
+            city,
+            state,
+            str(extracted.get("zip") or ""),
+            listing_text,
+            link,
+        ]
+    ).lower()
+
+    scores: dict[str, int] = {name: 0 for name in regions}
+    for region in regions:
+        if city and _normalize_place_name(city) == _normalize_place_name(region):
+            scores[region] += 100
+        hints = _REGION_LOCATION_HINTS.get(region, [])
+        for pattern, points in hints:
+            if re.search(pattern, blob, flags=re.IGNORECASE):
+                scores[region] += points
+
+    top_score = max(scores.values())
+    if top_score < 15:
+        loc = ", ".join(p for p in (city, state) if p) or "(missing city/state)"
+        raise ValueError(
+            f"Could not detect which Sheet tab matches this listing ({loc}). "
+            "Paste the full address (city and state), or set **Sheet tab override** under Advanced."
+        )
+
+    winners = [name for name, pts in scores.items() if pts == top_score]
+    if len(winners) > 1:
+        raise ValueError(
+            "This listing could match more than one region tab "
+            f"({', '.join(winners)}). Use **Sheet tab override** under Advanced."
+        )
+    return winners[0]
+
+
+def resolve_sheet_tab(
+    extracted: dict[str, Any],
+    *,
+    listing_text: str = "",
+    link: str = "",
+    explicit: str | None = None,
+    regions: list[str],
+) -> str:
+    if explicit and explicit.strip():
+        tab = explicit.strip()
+        if tab not in regions:
+            raise ValueError(
+                f"Unknown Sheet tab '{tab}'. Configured tabs: {', '.join(regions)}."
+            )
+        return tab
+    return infer_sheet_tab(
+        extracted, listing_text=listing_text, link=link, regions=regions
+    )
+
+
+def region_strategy_path(sheet_tab: str | None) -> Path | None:
+    if not sheet_tab:
+        return None
+    path = ROOT / "regions" / f"{sheet_tab}.md"
+    return path if path.is_file() else None
+
+
+def load_strategy_raw_for_region(sheet_tab: str | None) -> str:
+    path = region_strategy_path(sheet_tab)
+    if path:
+        return read_text(path)
+    return load_strategy_raw()
+
+
+def scoring_files_for_region(sheet_tab: str | None) -> tuple[str, str]:
+    if sheet_tab == COLUMBUS_REGION:
+        return "scoring_prompt_columbus.md", "scoring_schema_columbus.json"
+    return "scoring_prompt.md", "scoring_schema.json"
+
+
+def load_columbus_transit_reference() -> str:
+    return read_text(ROOT / "regions" / "columbus_transit_reference.md")
+
+
 def strategy_rules_without_weights(strategy_md: str | None = None) -> str:
     text = strategy_md if strategy_md is not None else load_strategy_raw()
     return re.sub(r"```yaml\s*.*?```", "", text, count=1, flags=re.DOTALL | re.IGNORECASE).strip()
@@ -70,6 +206,28 @@ def slugify(text: str) -> str:
     text = re.sub(r"[^\w\s-]", "", text)
     text = re.sub(r"[\s-]+", "_", text)
     return text.strip("_")[:120] or "property"
+
+
+def normalize_rent_fields(extracted: dict[str, Any]) -> dict[str, Any]:
+    """Listing-stated gross annual income wins over inconsistent monthly estimates."""
+    gross = extracted.get("gross_annual_income")
+    monthly = extracted.get("estimated_rent")
+    try:
+        gross_f = float(gross) if gross is not None else None
+    except (TypeError, ValueError):
+        gross_f = None
+    try:
+        monthly_f = float(monthly) if monthly is not None else None
+    except (TypeError, ValueError):
+        monthly_f = None
+
+    if gross_f is not None and gross_f > 0:
+        implied_monthly = gross_f / 12
+        if monthly_f is None or abs(monthly_f * 12 - gross_f) > 100:
+            extracted["estimated_rent"] = round(implied_monthly, 2)
+    elif monthly_f is not None and monthly_f > 0 and gross_f is None:
+        extracted["gross_annual_income"] = round(monthly_f * 12, 2)
+    return extracted
 
 
 def property_id_from_extracted(extracted: dict[str, Any], label: str | None = None) -> str:
