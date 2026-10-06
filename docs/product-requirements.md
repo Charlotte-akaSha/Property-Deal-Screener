@@ -39,15 +39,17 @@ Target user time per analysis: under ~2 minutes (excluding API latency) — per 
 1. Gemini multimodal **extraction** → `extraction_schema.json`
 2. Google Maps **transit lookup** (walk to nearest rail station + train to regional hub)
 3. Property ID slug → `properties/<id>/` folder created
-4. Gemini **scoring** → nine category scores + recommendation + narrative fields
-5. Python **weighted overall** via `scoring.py`
-6. Local timestamped archive + `latest.json`
-7. Google Sheets upsert (personal columns preserved on re-analyze)
+4. Gemini **market research** (Google Search when available) → neighbourhood, long-term appreciation, rental demand
+5. Gemini **scoring** → nine category scores + recommendation + narrative fields
+6. Python **weighted overall** via `scoring.py`
+7. Local timestamped archive + `latest.json`
+8. Google Sheets upsert (personal columns preserved on re-analyze)
 
 ### Outputs (on screen)
 
 - Match score, recommendation, category scores
 - Price, estimated rent, estimated insurance
+- Neighbourhood, long-term appreciation, and rental-potential research
 - Transit summary (when Maps key configured)
 - Strengths, weaknesses, red flags, questions, rationale
 - Sheet link or distinct failure message if Sheets write fails
@@ -59,9 +61,10 @@ Pipeline order (`analyze_from_memory`):
 1. Gemini extraction
 2. Transit lookup
 3. `save_listing_inputs()` — creates `properties/<id>/`, writes `listing.txt` / photos / comments
-4. Gemini scoring
-5. `persist_local()` — writes `analysis_*.json`, `report_*.md`, `latest.json`
-6. Google Sheets upsert
+4. Gemini market research (neighbourhood, appreciation, rental)
+5. Gemini scoring
+6. `persist_local()` — writes `analysis_*.json`, `report_*.md`, `latest.json`
+7. Google Sheets upsert
 
 What gets written on failure:
 

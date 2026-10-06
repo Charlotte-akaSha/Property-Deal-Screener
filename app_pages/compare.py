@@ -249,6 +249,9 @@ def render_property_dialog(row: pd.Series) -> None:
                 st.link_button("Open listing", str(row["Link"]), icon=":material/open_in_new:")
 
     st.space("small")
+    theme_css.render_market_research_sections(row)
+
+    st.space("small")
     g1, g2 = st.columns(2)
     with g1:
         with theme_css.card("d_strengths"):

@@ -11,11 +11,13 @@ from typing import Any
 import streamlit as st
 from PIL import Image
 from streamlit_paste_button import paste_image_button
+from streamlit_sortables import sort_items
 
 from utils import MAX_PHOTOS, join_list
 
 PASTED_PHOTOS_KEY = "pasted_photos"
-LAST_PASTE_HASH_KEY = "last_paste_hash"
+PASTED_HASHES_KEY = "pasted_photo_hashes"
+PASTE_GENERATION_KEY = "paste_button_generation"
 
 
 def normalize_listing_url(url: object) -> str:
@@ -81,55 +83,99 @@ def _ensure_pasted_photos_state() -> list[tuple[str, bytes]]:
 
 def clear_pasted_photos() -> None:
     st.session_state[PASTED_PHOTOS_KEY] = []
-    st.session_state.pop(LAST_PASTE_HASH_KEY, None)
+    st.session_state[PASTED_HASHES_KEY] = set()
+    st.session_state[PASTE_GENERATION_KEY] = 0
+
+
+def _pasted_hashes() -> set[str]:
+    if PASTED_HASHES_KEY not in st.session_state:
+        st.session_state[PASTED_HASHES_KEY] = set()
+    return st.session_state[PASTED_HASHES_KEY]
+
+
+def _render_pasted_gallery(pasted: list[tuple[str, bytes]]) -> None:
+    """Drag-and-drop reorder + thumbnails for pasted images."""
+    if not pasted:
+        return
+    st.caption(f"{len(pasted)} pasted image(s) — drag chips to reorder")
+    sort_keys = [f"#{idx + 1}" for idx in range(len(pasted))]
+    sorted_keys = sort_items(
+        sort_keys,
+        header=None,
+        direction="horizontal",
+        key="pasted_photos_sort",
+        custom_style="""
+        .sortable-item {
+          font-weight: 600;
+          padding: 6px 12px;
+          border-radius: 8px;
+          background: #eef0f6;
+          cursor: grab;
+        }
+        """,
+    )
+    if sorted_keys != sort_keys:
+        order = [int(k.lstrip("#")) - 1 for k in sorted_keys]
+        st.session_state[PASTED_PHOTOS_KEY] = [pasted[i] for i in order]
+        st.rerun()
+    cols = st.columns(min(len(pasted), MAX_PHOTOS))
+    for idx, (name, data) in enumerate(pasted[:MAX_PHOTOS]):
+        with cols[idx % len(cols)]:
+            st.image(data, caption=f"{idx + 1}. {name}", width="stretch")
+    if st.button("Clear pasted images", key="clear_pasted_photos"):
+        clear_pasted_photos()
+        st.rerun()
 
 
 def render_clipboard_photo_picker() -> None:
     """Paste images from the system clipboard (e.g. Zillow screenshot)."""
     pasted = _ensure_pasted_photos_state()
+    remaining = MAX_PHOTOS - len(pasted)
     st.caption(
-        "Optional: copy an image (Zillow → **Copy Image**, or a screenshot), then click paste below. "
-        f"If paste is blocked by your browser, use **upload** instead (up to {MAX_PHOTOS} total)."
+        f"Optional: copy **one** image, click **Paste**, repeat until you have up to {MAX_PHOTOS} "
+        f"({remaining} slot(s) left with pasted + upload). "
+        "If paste is blocked, use **upload** below."
     )
-    try:
-        paste = paste_image_button(
-            "Paste image from clipboard",
-            background_color="#5b6ee1",
-            hover_background_color="#4a5bc4",
-            key="listing_paste_image",
-            errors="ignore",
-        )
-    except Exception:  # noqa: BLE001 — browser may block clipboard read
-        paste = None
-        st.session_state["clipboard_paste_blocked"] = True
-    if st.session_state.get("clipboard_paste_blocked"):
-        st.info(
-            "Your browser blocked clipboard access (common in Safari or locked-down tabs). "
-            "Save the image or take a screenshot, then add it with **upload** below.",
-            icon=":material/info:",
-        )
-    if paste is not None and paste.image_data is not None:
-        st.session_state.pop("clipboard_paste_blocked", None)
-        buf = io.BytesIO()
-        paste.image_data.save(buf, format="PNG")
-        data = buf.getvalue()
-        digest = hashlib.sha256(data).hexdigest()
-        if st.session_state.get(LAST_PASTE_HASH_KEY) != digest:
-            if len(pasted) + 1 > MAX_PHOTOS:
+    if remaining <= 0:
+        st.caption("Photo limit reached — clear pasted images or remove uploads to paste more.")
+    else:
+        paste_generation = int(st.session_state.get(PASTE_GENERATION_KEY, 0))
+        try:
+            paste = paste_image_button(
+                f"Paste image from clipboard ({len(pasted)}/{MAX_PHOTOS})",
+                background_color="#5b6ee1",
+                hover_background_color="#4a5bc4",
+                key=f"listing_paste_image_{paste_generation}",
+                errors="ignore",
+            )
+        except Exception:  # noqa: BLE001 — browser may block clipboard read
+            paste = None
+            st.session_state["clipboard_paste_blocked"] = True
+        if st.session_state.get("clipboard_paste_blocked"):
+            st.info(
+                "Your browser blocked clipboard access (common in Safari or locked-down tabs). "
+                "Save the image or take a screenshot, then add it with **upload** below.",
+                icon=":material/info:",
+            )
+        if paste is not None and paste.image_data is not None:
+            st.session_state.pop("clipboard_paste_blocked", None)
+            buf = io.BytesIO()
+            paste.image_data.save(buf, format="PNG")
+            data = buf.getvalue()
+            digest = hashlib.sha256(data).hexdigest()
+            hashes = _pasted_hashes()
+            if digest in hashes:
+                st.warning("That image is already in your pasted list.")
+                st.session_state[PASTE_GENERATION_KEY] = paste_generation + 1
+                st.rerun()
+            elif len(pasted) >= MAX_PHOTOS:
                 st.warning(f"Maximum {MAX_PHOTOS} photos — remove some before pasting more.")
             else:
                 pasted.append((f"clipboard_{len(pasted) + 1}.png", data))
-                st.session_state[LAST_PASTE_HASH_KEY] = digest
+                hashes.add(digest)
+                st.session_state[PASTE_GENERATION_KEY] = paste_generation + 1
                 st.rerun()
-    if pasted:
-        st.caption(f"{len(pasted)} pasted image(s)")
-        cols = st.columns(min(len(pasted), MAX_PHOTOS))
-        for idx, (name, data) in enumerate(pasted[:MAX_PHOTOS]):
-            with cols[idx % len(cols)]:
-                st.image(data, caption=name, width="stretch")
-        if st.button("Clear pasted images", key="clear_pasted_photos"):
-            clear_pasted_photos()
-            st.rerun()
+    _render_pasted_gallery(pasted)
 
 
 def collect_image_uploads(

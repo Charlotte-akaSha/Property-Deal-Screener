@@ -33,6 +33,8 @@ Every category score is **0–10** with the **same direction**:
 
 financial, location, property, appreciation, rental, management, lifestyle, climate, risk
 
+When **address-specific market research** JSON is provided (`neighbourhood`, `appreciation`, `rental`), use it for **location**, **appreciation**, and **rental** scores. Do not ignore neighbourhood character or rental-demand findings.
+
 ## Also return
 
 - `recommendation`: one of `"Reject"`, `"Save"`, `"Worth visiting"`

@@ -10,10 +10,10 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-_default_favicon = ROOT / "static" / "favicon-light.svg"
+_adaptive_favicon = ROOT / "static" / "favicon.svg"
 st.set_page_config(
     page_title="Property Screener",
-    page_icon=str(_default_favicon) if _default_favicon.is_file() else ":material/home_work:",
+    page_icon=str(_adaptive_favicon) if _adaptive_favicon.is_file() else ":material/home_work:",
     layout="wide",
 )
 

@@ -12,7 +12,17 @@ For each property, reason about:
 
 Do **not** score “Hilliard” or “Columbus” generically — distinguish **Line 30 corridor access** vs car-dependent pockets of the same suburb.
 
-## Hilliard and western suburbs (Line 30 thesis)
+## Western Columbus — Hilliard Rome corridor (not Hilliard city)
+
+Many listings near **Hilliard Rome Rd** (e.g. **Beacon Hill**, zip **43228**) are in the **City of Columbus**, not **Hilliard**. The street name is not the municipality — use extracted **city** / zip.
+
+These parcels are typically **not** on **COTA Line 30** (Line 30 serves Hilliard / UA / OSU / Downtown to the north and west of this corridor). **Do not** call the property “in Hilliard” or credit **Hilliard–Downtown rapid transit**, **Leap Road LinkUS**, or **Hilliard rail station** studies as **local** catalysts unless verified very close to the parcel.
+
+**Current transit can still be strong:** score from the **`transit` block** — e.g. **≤5 min walk** to a stop, **0-transfer** trip, **≤60 min** door-to-door Downtown often supports **current transit ~7–8/10** and **transit tier B** even without Line 30 or future BRT at the door.
+
+**Future transit (this submarket):** without a funded station/BRT at the address, **future transit investment** and **transit appreciation** are usually **modest (~5–6/10)** — regional **COTA 2027–2031** frequency/connectivity at best, not a parcel-specific catalyst. Prefer **`Possible`** (weak) or **`None identified`** over Hilliard/Line 30 language.
+
+## Hilliard city (Line 30 thesis)
 
 **COTA Line 30** — **operating** (Hilliard → Upper Arlington → OSU → Downtown; direct, ~30 min headway, 7 days/week). Properties with a short walk to Line 30 stops deserve **strong current transit** scores (often **7.5–8/10**), not “suburban bus only.”
 

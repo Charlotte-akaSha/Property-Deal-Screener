@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +28,12 @@ from utils import (
     load_schema,
     COLUMBUS_REGION,
     load_strategy_raw_for_region,
-    normalize_rent_fields,
     property_id_from_extracted,
     resolve_sheet_tab,
     scoring_files_for_region,
     strategy_rules_without_weights,
 )
+from market_research import research_market
 from transit_lookup import lookup_transit
 from write_to_sheets import list_regions, upsert_analysis
 
@@ -41,6 +42,28 @@ def _region_for_transit(sheet_tab: str | None) -> str:
     if not sheet_tab:
         raise ValueError("Region is required for transit lookup.")
     return sheet_tab
+
+
+def normalize_rent_fields(extracted: dict[str, Any]) -> dict[str, Any]:
+    """Listing-stated gross annual income wins over inconsistent monthly estimates."""
+    gross = extracted.get("gross_annual_income")
+    monthly = extracted.get("estimated_rent")
+    try:
+        gross_f = float(gross) if gross is not None else None
+    except (TypeError, ValueError):
+        gross_f = None
+    try:
+        monthly_f = float(monthly) if monthly is not None else None
+    except (TypeError, ValueError):
+        monthly_f = None
+
+    if gross_f is not None and gross_f > 0:
+        implied_monthly = gross_f / 12
+        if monthly_f is None or abs(monthly_f * 12 - gross_f) > 100:
+            extracted["estimated_rent"] = round(implied_monthly, 2)
+    elif monthly_f is not None and monthly_f > 0 and gross_f is None:
+        extracted["gross_annual_income"] = round(monthly_f * 12, 2)
+    return extracted
 
 
 def extract_facts(
@@ -80,6 +103,7 @@ def score_property(
     *,
     user_comments: str = "",
     sheet_tab: str | None = None,
+    market_research: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     client = get_gemini_client()
     prompt_name, schema_name = scoring_files_for_region(sheet_tab)
@@ -96,6 +120,11 @@ def score_property(
         "Extracted property facts (JSON):\n" + json.dumps(payload, indent=2),
         "Note: transit walk/train times are computed via Google Maps, not from the listing.",
     ]
+    if market_research:
+        user_parts.append(
+            "Address-specific market research (use for location, appreciation, and rental scores):\n"
+            + json.dumps(market_research, indent=2)
+        )
     if sheet_tab == COLUMBUS_REGION:
         user_parts.insert(
             1,
@@ -123,6 +152,11 @@ def score_property(
     }
     if scored_raw.get("regional_assessment"):
         result["regional_assessment"] = scored_raw["regional_assessment"]
+    if market_research:
+        result["neighbourhood_name"] = market_research.get("neighbourhood_name") or ""
+        result["neighbourhood_research"] = market_research.get("neighbourhood") or ""
+        result["appreciation_research"] = market_research.get("appreciation") or ""
+        result["rental_research"] = market_research.get("rental") or ""
     if sheet_tab:
         result["region"] = sheet_tab
     return result
@@ -191,8 +225,16 @@ def analyze_from_memory(
         user_comments=comments,
         image_uploads=image_uploads,
     )
+    # Brief pause between heavy Gemini calls (extraction → research → scoring).
+    time.sleep(2)
+    research = research_market(extracted, transit=transit, sheet_tab=sheet_tab)
+    time.sleep(2)
     scored = score_property(
-        extracted, transit=transit, user_comments=comments, sheet_tab=sheet_tab
+        extracted,
+        transit=transit,
+        user_comments=comments,
+        sheet_tab=sheet_tab,
+        market_research=research,
     )
     analysis = persist_local(
         folder,
@@ -251,11 +293,15 @@ def analyze_from_folder(
     )
     property_id = folder.name
     transit = lookup_transit(extracted, sheet_tab=_region_for_transit(sheet_tab))
+    time.sleep(2)
+    research = research_market(extracted, transit=transit, sheet_tab=sheet_tab)
+    time.sleep(2)
     scored = score_property(
         extracted,
         transit=transit,
         user_comments=user_comments,
         sheet_tab=sheet_tab,
+        market_research=research,
     )
     analysis = persist_local(
         folder,

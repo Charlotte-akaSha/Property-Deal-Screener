@@ -19,8 +19,17 @@ ROOT = Path(__file__).resolve().parent.parent
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 MAX_PHOTOS = 5
 PROMPT_VERSION = "extraction_v1 / scoring_v1"
-MAX_API_RETRIES = 4
-API_RETRY_BASE_DELAY_SEC = 2.0
+MAX_API_RETRIES = 6
+API_RETRY_BASE_DELAY_SEC = 4.0
+DEFAULT_GEMINI_FALLBACKS = ("gemini-3.6-flash", "gemini-3.8-flash")
+DEPRECATED_GEMINI_MODELS = frozenset(
+    {
+        "gemini-2.0-flash",
+        "gemini-2.5-flash",
+        "models/gemini-2.0-flash",
+        "models/gemini-2.5-flash",
+    }
+)
 TRANSIENT_API_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
@@ -31,6 +40,28 @@ def load_env() -> None:
 
 def get_model_name() -> str:
     return os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
+
+
+def model_candidates() -> list[str]:
+    """Primary GEMINI_MODEL plus GEMINI_MODEL_FALLBACKS and built-in alternates."""
+    load_env()
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add(name: str) -> None:
+        n = name.strip()
+        if n and n not in seen:
+            seen.add(n)
+            names.append(n)
+
+    add(get_model_name())
+    for part in os.getenv("GEMINI_MODEL_FALLBACKS", "").split(","):
+        add(part)
+    if not os.getenv("GEMINI_MODEL_FALLBACKS", "").strip():
+        for fallback in DEFAULT_GEMINI_FALLBACKS:
+            add(fallback)
+    filtered = [m for m in names if m not in DEPRECATED_GEMINI_MODELS]
+    return filtered or [get_model_name()]
 
 
 def get_gemini_client() -> genai.Client:
@@ -208,28 +239,6 @@ def slugify(text: str) -> str:
     return text.strip("_")[:120] or "property"
 
 
-def normalize_rent_fields(extracted: dict[str, Any]) -> dict[str, Any]:
-    """Listing-stated gross annual income wins over inconsistent monthly estimates."""
-    gross = extracted.get("gross_annual_income")
-    monthly = extracted.get("estimated_rent")
-    try:
-        gross_f = float(gross) if gross is not None else None
-    except (TypeError, ValueError):
-        gross_f = None
-    try:
-        monthly_f = float(monthly) if monthly is not None else None
-    except (TypeError, ValueError):
-        monthly_f = None
-
-    if gross_f is not None and gross_f > 0:
-        implied_monthly = gross_f / 12
-        if monthly_f is None or abs(monthly_f * 12 - gross_f) > 100:
-            extracted["estimated_rent"] = round(implied_monthly, 2)
-    elif monthly_f is not None and monthly_f > 0 and gross_f is None:
-        extracted["gross_annual_income"] = round(monthly_f * 12, 2)
-    return extracted
-
-
 def property_id_from_extracted(extracted: dict[str, Any], label: str | None = None) -> str:
     if label and label.strip():
         return slugify(label)
@@ -300,7 +309,18 @@ def is_transient_api_error(exc: Exception) -> bool:
         return True
     if isinstance(exc, errors.APIError):
         return exc.code in TRANSIENT_API_STATUS_CODES
-    return False
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in ("503", "429", "overloaded", "unavailable", "resource_exhausted")
+    )
+
+
+def is_unavailable_model_error(exc: Exception) -> bool:
+    if isinstance(exc, errors.APIError) and exc.code == 404:
+        return True
+    msg = str(exc).lower()
+    return "no longer available" in msg or ("404" in msg and "model" in msg)
 
 
 def generate_content_with_retry(
@@ -340,17 +360,34 @@ def generate_json(
             "Previous response failed validation. Fix and return valid JSON only.\n"
             f"Validation error:\n{retry_hint}"
         )
-    response = generate_content_with_retry(
-        client,
-        model=get_model_name(),
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            response_mime_type="application/json",
-            response_json_schema=schema,
-            temperature=0.2,
-        ),
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        response_mime_type="application/json",
+        response_json_schema=schema,
+        temperature=0.2,
     )
+    response = None
+    models = model_candidates()
+    last_error: Exception | None = None
+    for idx, model in enumerate(models):
+        try:
+            response = generate_content_with_retry(
+                client,
+                model=model,
+                contents=contents,
+                config=config,
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+            can_try_next = idx < len(models) - 1 and (
+                is_transient_api_error(exc) or is_unavailable_model_error(exc)
+            )
+            if not can_try_next:
+                raise
+            time.sleep(API_RETRY_BASE_DELAY_SEC * (idx + 1))
+    if response is None:
+        raise RuntimeError("Gemini API failed for all configured models") from last_error
     raw = response.text or ""
     data = parse_json_response(raw)
     if not isinstance(data, dict):

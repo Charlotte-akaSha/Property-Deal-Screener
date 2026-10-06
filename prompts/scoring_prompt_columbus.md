@@ -16,11 +16,17 @@ Use `walk_to_station_*` as walk to the nearest **bus stop** (COTA). Use `train_t
 
 Weight location heavily on: ≤10 min walk + useful frequency + direct-ish route + strong door-to-door time within the bands above.
 
-**Western suburbs / Hilliard:** If **COTA Line 30** is walkable, score **current transit** in the **7.5–8** range when Maps shows a direct, usable connection to OSU/Downtown — not generic suburban bus. For **future transit**, distinguish **operating Line 30** from **proposed** Hilliard–Downtown rapid transit (score future ~**7/10**, not as high as **funded East Main BRT** near Bexley). Do **not** treat rail feasibility studies as funded projects.
+**Municipality:** Use extracted **city** and zip — **Hilliard Rome Rd** / “west side” listings are often **Columbus (43228)**, not Hilliard. Never label the parcel “Hilliard” when `city` is Columbus.
 
-Fill **`future_transit_detail`** with project-by-project research (see transit reference): operating vs funded vs proposed vs study, and walk/access to Line 30 or other corridors. **`future_transit_catalyst_note`** stays a shorter summary; **`future_transit_detail`** is the full commute/future-plan write-up for the Details view.
+**Hilliard city / Line 30:** If **COTA Line 30** is walkable, score **current transit** ~**7.5–8** when Maps shows direct OSU/Downtown service. **Future transit** ~**7/10** only when Hilliard/Line 30 or funded corridor logic applies — not for western Columbus off Line 30.
+
+**Western Columbus (e.g. Beacon Hill, Hilliard Rome corridor):** **Current transit** from real walk + door-to-door times (1-min walk + direct Downtown can still be **7–8/10**). **Future transit** usually **~5–6/10** — no Line 30, no committed local BRT; do not borrow Hilliard rapid-transit narratives. Say clearly what is **not** planned at the parcel.
+
+Fill **`future_transit_detail`** with accurate geography (Columbus vs Hilliard), nearest stop/route, operating service today, and only **nearby** funded/proposed projects. **`future_transit_catalyst_note`** stays short.
 
 Use **listing-stated `gross_annual_income`** for financial/rental scoring when present — do not invent higher income than the ad states.
+
+When **address-specific market research** JSON is provided (`neighbourhood`, `appreciation`, `rental`), use it for **location**, **appreciation**, and **rental** scores and for `regional_assessment` write-ups. Do not contradict researched neighbourhood identity (e.g. Columbus 43228 vs Hilliard).
 
 ## Score semantics
 

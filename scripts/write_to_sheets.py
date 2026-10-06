@@ -77,6 +77,10 @@ HEADERS = [
     "Transit Plan Detail",
     "Appreciation Potential",
     "Rental Potential",
+    "Neighbourhood",
+    "Neighbourhood Research",
+    "Appreciation Research",
+    "Rental Research",
 ]
 
 PERSONAL_COLUMN_LIST = ["Wow Factor", "Notes", "Visit Date", "Final Decision"]
@@ -90,6 +94,10 @@ COMPARE_COLUMN_LIST = [
     "Transit Plan Detail",
     "Appreciation Potential",
     "Rental Potential",
+    "Neighbourhood",
+    "Neighbourhood Research",
+    "Appreciation Research",
+    "Rental Research",
 ]
 UPDATABLE_COUNT = HEADERS.index("Wow Factor")
 
@@ -337,6 +345,10 @@ def _compare_fields(
         ).strip(),
         "Appreciation Potential": _band_high_medium_low(categories.get("appreciation")),
         "Rental Potential": _band_high_medium_low(categories.get("rental")),
+        "Neighbourhood": str(scored.get("neighbourhood_name") or "").strip(),
+        "Neighbourhood Research": str(scored.get("neighbourhood_research") or "").strip(),
+        "Appreciation Research": str(scored.get("appreciation_research") or "").strip(),
+        "Rental Research": str(scored.get("rental_research") or "").strip(),
     }
 
 

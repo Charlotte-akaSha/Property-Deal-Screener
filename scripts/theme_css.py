@@ -559,27 +559,50 @@ a.pc-prop-link:hover {
 _FAVICON_SCRIPT = """
 <script>
 (function () {
-  const LIGHT = "/app/static/favicon-light.svg";
-  const DARK = "/app/static/favicon-dark.svg";
-  function pickHref() {
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? DARK : LIGHT;
+  // Dark browser UI → white icon; light browser UI → dark icon
+  const ICON_LIGHT_UI = "/app/static/favicon-light.svg";
+  const ICON_DARK_UI = "/app/static/favicon-dark.svg";
+  const ICON_ADAPTIVE = "/app/static/favicon.svg";
+
+  function clearForeignIcons() {
+    document.querySelectorAll('link[rel*="icon"]:not([data-pc-adaptive-favicon])').forEach(
+      (node) => node.remove()
+    );
   }
+
   function applyFavicon() {
-    const href = pickHref();
-    let link = document.querySelector('link[data-pc-adaptive-favicon="1"]');
-    if (!link) {
-      link = document.createElement("link");
-      link.rel = "icon";
-      link.type = "image/svg+xml";
-      link.setAttribute("data-pc-adaptive-favicon", "1");
-      document.head.appendChild(link);
-    }
-    if (link.getAttribute("href") !== href) {
-      link.setAttribute("href", href);
-    }
+    clearForeignIcons();
+    document.querySelectorAll("link[data-pc-adaptive-favicon]").forEach((n) => n.remove());
+
+    const adaptive = document.createElement("link");
+    adaptive.rel = "icon";
+    adaptive.type = "image/svg+xml";
+    adaptive.href = ICON_ADAPTIVE;
+    adaptive.setAttribute("data-pc-adaptive-favicon", "1");
+    document.head.appendChild(adaptive);
+
+    const forLightChrome = document.createElement("link");
+    forLightChrome.rel = "icon";
+    forLightChrome.type = "image/svg+xml";
+    forLightChrome.href = ICON_LIGHT_UI;
+    forLightChrome.media = "(prefers-color-scheme: light)";
+    forLightChrome.setAttribute("data-pc-adaptive-favicon", "1");
+    document.head.appendChild(forLightChrome);
+
+    const forDarkChrome = document.createElement("link");
+    forDarkChrome.rel = "icon";
+    forDarkChrome.type = "image/svg+xml";
+    forDarkChrome.href = ICON_DARK_UI;
+    forDarkChrome.media = "(prefers-color-scheme: dark)";
+    forDarkChrome.setAttribute("data-pc-adaptive-favicon", "1");
+    document.head.appendChild(forDarkChrome);
   }
+
   applyFavicon();
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyFavicon);
+  setTimeout(applyFavicon, 0);
+  setTimeout(applyFavicon, 400);
+  setTimeout(applyFavicon, 1500);
 })();
 </script>
 """
@@ -704,3 +727,43 @@ def verdict_class(verdict: str) -> str:
         "Reject": "pc-verdict-reject",
         "Pass": "pc-verdict-reject",
     }.get(verdict, "pc-verdict-other")
+
+
+def _research_text(source: object, *keys: str) -> str:
+    getter = source.get if hasattr(source, "get") else None
+    for key in keys:
+        raw = getter(key) if getter else None
+        text = "" if raw is None else str(raw).strip()
+        if text and text.lower() not in {"nan", "none", "—"}:
+            return text
+    return ""
+
+
+def render_market_research_sections(source: object) -> None:
+    """Neighbourhood / appreciation / rental write-ups from Analyze or a Sheet row."""
+    neighbourhood = _research_text(
+        source, "neighbourhood_research", "Neighbourhood Research"
+    )
+    neighbourhood_name = _research_text(source, "neighbourhood_name", "Neighbourhood")
+    appreciation = _research_text(
+        source, "appreciation_research", "Appreciation Research"
+    )
+    rental = _research_text(source, "rental_research", "Rental Research")
+    if not (neighbourhood or appreciation or rental):
+        st.caption(
+            "No neighbourhood, appreciation, or rental research yet — "
+            "re-analyze this listing to fill these sections."
+        )
+        return
+    hood_title = (
+        f"Neighbourhood — {neighbourhood_name}" if neighbourhood_name else "Neighbourhood"
+    )
+    blocks = [
+        ("research_hood", hood_title, "location_on", "mint", neighbourhood),
+        ("research_apprec", "Long-term appreciation", "trending_up", "violet", appreciation),
+        ("research_rent", "Rental potential", "apartment", "peach", rental),
+    ]
+    for key, title, icon, accent, body in blocks:
+        with card(key):
+            section(title, icon, accent)
+            st.markdown(body or "—")

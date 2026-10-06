@@ -78,6 +78,7 @@ Google Sheets is the **CURRENT** shared data store and a **TEMPORARY BRIDGE** un
 `schema/extraction_schema.json` includes **`address`** and **`status`**, which are **not** separate Sheet columns.
 
 - **`HOA`** (monthly, from extraction `hoa`) is persisted in the **HOA** column after **Taxes**.
+- **Neighbourhood**, **Neighbourhood Research**, **Appreciation Research**, and **Rental Research** are filled on Analyze (address-specific research) and shown in Compare details.
 - `address` is reflected indirectly via Property ID slug; `status` lives in extraction JSON / local `analysis_*.json` only.
 
 ### Upsert behavior

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "neighbourhood_name",
+    "neighbourhood",
+    "appreciation",
+    "rental"
+  ],
+  "properties": {
+    "neighbourhood_name": { "type": "string" },
+    "neighbourhood": { "type": "string" },
+    "appreciation": { "type": "string" },
+    "rental": { "type": "string" }
+  }
+}

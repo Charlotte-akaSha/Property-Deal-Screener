@@ -138,7 +138,8 @@ if submitted:
             if is_transient_api_error(exc):
                 st.error(
                     "Gemini is temporarily overloaded. The app retried automatically but still failed. "
-                    "Wait a minute and try again, or switch `GEMINI_MODEL` in `.env`.",
+                    "Wait a minute and try again, or set `GEMINI_MODEL` / `GEMINI_MODEL_FALLBACKS` in `.env` "
+                    "(e.g. `GEMINI_MODEL_FALLBACKS=gemini-3.6-flash`).",
                     icon=":material/cloud_off:",
                 )
             else:
@@ -329,6 +330,9 @@ if submitted:
             with theme_css.card("why"):
                 theme_css.section("Why this score", "psychology", "amber")
                 render_bullet_list(rationale_to_bullets(scored["rationale"]))
+
+    st.space("small")
+    theme_css.render_market_research_sections(scored)
 
     st.space("small")
     g1, g2 = st.columns(2, gap="medium")

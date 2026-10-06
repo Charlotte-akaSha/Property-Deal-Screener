@@ -64,7 +64,7 @@ Local single-user Streamlit application. No API layer, no authentication, no clo
 
 | Module | Role |
 |--------|------|
-| `analyze_property.py` | Pipeline: extract → transit → slug → folder → score → local → Sheets |
+| `analyze_property.py` | Pipeline: extract → transit → slug → folder → market research → score → local → Sheets |
 | `scoring.py` | Parse `strategy.md` weights; compute weighted overall |
 | `utils.py` | Gemini client, schemas, prompts, slugs, retries |
 | `transit_lookup.py` | Google Maps geocode, nearest rail station, walk + transit times |
