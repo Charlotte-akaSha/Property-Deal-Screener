@@ -7,6 +7,14 @@ from typing import Any
 
 import pandas as pd
 
+from flood_lookup import flood_display_for_property
+from neighbourhood import neighbourhood_display_label
+from neighbourhood_tiers import (
+    area_appreciation_note,
+    area_rental_note,
+    neighbourhood_search_tier,
+    score_note_10,
+)
 from write_to_sheets import (
     HEADERS,
     PERSONAL_COLUMN_LIST,
@@ -200,7 +208,6 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
             strict=False,
         )
     ]
-    out["Flood"] = out.get("Flood Risk", pd.Series("", index=out.index)).map(_flood_display)
     out["Transit now"] = [
         _prefer(stored, _transit_now_from_row(walk, location))
         for stored, walk, location in zip(
@@ -213,22 +220,6 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["Transit future"] = out.get("Future Transit", pd.Series("", index=out.index)).map(
         lambda v: str(v).strip() or "—"
     )
-    out["Appreciation label"] = [
-        _prefer(stored, _band(score))
-        for stored, score in zip(
-            out.get("Appreciation Potential", pd.Series("", index=out.index)),
-            out.get("Appreciation", pd.Series(dtype=float, index=out.index)),
-            strict=False,
-        )
-    ]
-    out["Rental potential"] = [
-        _prefer(stored, _band(score))
-        for stored, score in zip(
-            out.get("Rental Potential", pd.Series("", index=out.index)),
-            out.get("Rental", pd.Series(dtype=float, index=out.index)),
-            strict=False,
-        )
-    ]
     out["Net monthly"] = rent - taxes / 12 - insurance / 12 - hoa.fillna(0)
 
     def score_profile(row: pd.Series) -> list[float]:
@@ -242,7 +233,66 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
         return vals
 
     out["Score profile"] = out.apply(score_profile, axis=1)
+    out["Neighbourhood display"] = [
+        neighbourhood_display_label(
+            n,
+            c,
+            s,
+            neighbourhood_research=r,
+            listing_url=link,
+        )
+        for n, c, s, r, link in zip(
+            out.get("Neighbourhood", pd.Series("", index=out.index)),
+            out.get("City", pd.Series("", index=out.index)),
+            out.get("State", pd.Series("", index=out.index)),
+            out.get("Neighbourhood Research", pd.Series("", index=out.index)),
+            out.get("Link", pd.Series("", index=out.index)),
+            strict=False,
+        )
+    ]
+    out["Neighbourhood tier"] = out["Neighbourhood display"].map(neighbourhood_search_tier)
+    appreciation_scores = out.get("Appreciation", pd.Series(dtype=float, index=out.index))
+    rental_scores = out.get("Rental", pd.Series(dtype=float, index=out.index))
+    out["Appreciation label"] = [
+        _area_market_note(display, area_appreciation_note(display), score)
+        for display, score in zip(out["Neighbourhood display"], appreciation_scores, strict=False)
+    ]
+    out["Rental potential"] = [
+        _area_market_note(display, area_rental_note(display), score)
+        for display, score in zip(out["Neighbourhood display"], rental_scores, strict=False)
+    ]
+    flood_stored = out.get("Flood Risk", pd.Series("", index=out.index))
+    property_ids = out["Property ID"].astype(str)
+    try:
+        from geocode import coordinates_for
+
+        coord_map = coordinates_for(property_ids.tolist())
+    except Exception:  # noqa: BLE001
+        coord_map = {}
+    out["Flood"] = [
+        flood_display_for_property(
+            pid,
+            stored,
+            display,
+            lat=coord_map.get(pid, (None, None))[0],
+            lon=coord_map.get(pid, (None, None))[1],
+        )
+        for pid, stored, display in zip(
+            property_ids, flood_stored, out["Neighbourhood display"], strict=False
+        )
+    ]
     return out
+
+
+def _area_market_note(display: object, area_note: str | None, property_score: object) -> str:
+    if area_note:
+        return area_note
+    if property_score is not None and not (isinstance(property_score, float) and pd.isna(property_score)):
+        try:
+            return score_note_10(float(property_score))
+        except (TypeError, ValueError):
+            pass
+    return "—"
 
 
 def _prefer(stored: object, fallback: str) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import sys
+import urllib.parse
 from pathlib import Path
 
 import altair as alt
@@ -23,9 +24,11 @@ from photos import (  # noqa: E402
     find_property_photo,
     readable_property_name,
 )
+from neighbourhood_tiers import RULES_VERSION, neighbourhood_search_tier  # noqa: E402
 from sheets_data import (  # noqa: E402
     PERSONAL_COLUMN_LIST,
     SCORE_COLUMNS,
+    add_derived_columns,
     load_properties,
     save_personal_edits,
 )
@@ -63,20 +66,307 @@ COMPARE_COLUMNS = [
 
 NOTES_COLUMNS = ["Property ID", "Region", "_sheet_row", *PERSONAL_COLUMN_LIST]
 
+# (header label, sort key) — keys handled in sort_compare_dataframe
+COMPARE_TABLE_HEADERS: list[tuple[str, str]] = [
+    ("Property", "property"),
+    ("Neighbourhood", "location"),
+    ("Price", "price"),
+    ("House", "house_size"),
+    ("Lot", "lot_size"),
+    ("HOA / mo", "hoa"),
+    ("Units", "units"),
+    ("Est. gross rent", "gross_rent"),
+    ("Est. net yield", "net_yield"),
+    ("Garage / trailer", "trailer"),
+    ("Flood risk", "flood"),
+    ("Current transit", "transit_now"),
+    ("Future transit", "transit_future"),
+    ("Appreciation", "appreciation"),
+    ("Rental", "rental"),
+    ("Match", "overall"),
+    ("Verdict", "verdict"),
+]
+
+# Matches sheets_data._verdict_label — sort by what the Verdict column shows.
+_VERDICT_ORDER = {
+    "Buy": 0,
+    "Strong candidate": 1,
+    "Investigate": 2,
+    "Pass": 3,
+    "Worth visiting": 1,
+    "Save": 2,
+    "Reject": 3,
+}
+
 
 def _sheets_cache_generation() -> int:
     return int(st.session_state.get("sheets_cache_generation", 0))
 
 
 @st.cache_data(ttl="10m", show_spinner="Loading properties from Google Sheets…")
-def cached_load_properties(regions: tuple[str, ...], _generation: int) -> pd.DataFrame:
-    del _generation  # bust cache when generation bumps after Analyze / Refresh
+def cached_load_properties(
+    regions: tuple[str, ...],
+    _generation: int,
+    _hood_rules: int,
+) -> pd.DataFrame:
+    del _generation, _hood_rules  # bust cache after refresh or tier rule changes
     return load_properties(list(regions))
 
 
 @st.cache_data(ttl="24h", show_spinner="Locating properties…")
 def cached_coordinates(property_ids: tuple[str, ...]) -> dict[str, tuple[float, float]]:
     return coordinates_for(list(property_ids))
+
+
+def _sync_compare_sort() -> tuple[str, bool]:
+    qp_sort = st.query_params.get("compare_sort")
+    qp_dir = st.query_params.get("compare_dir")
+    if qp_sort:
+        st.session_state["compare_sort"] = str(qp_sort)
+        st.session_state["compare_sort_asc"] = str(qp_dir or "desc").lower() == "asc"
+    sort_key = str(st.session_state.get("compare_sort", "overall"))
+    ascending = bool(st.session_state.get("compare_sort_asc", False))
+    return sort_key, ascending
+
+
+def _default_sort_ascending(sort_key: str) -> bool:
+    return sort_key in {"property", "location", "trailer", "transit_now", "transit_future", "verdict"}
+
+
+def _sort_header_link(
+    label: str,
+    sort_key: str,
+    *,
+    sticky: bool = False,
+    sticky_end: bool = False,
+) -> str:
+    active_key, active_asc = _sync_compare_sort()
+    is_active = active_key == sort_key
+    arrow = (" ▲" if active_asc else " ▼") if is_active else ""
+    if is_active:
+        next_asc = not active_asc
+    else:
+        next_asc = _default_sort_ascending(sort_key)
+    params: dict[str, str] = {
+        "compare_sort": sort_key,
+        "compare_dir": "asc" if next_asc else "desc",
+    }
+    detail = st.query_params.get("detail")
+    if detail:
+        params["detail"] = str(detail)
+    href = "?" + urllib.parse.urlencode(params)
+    cls = "pc-sort-link"
+    if is_active:
+        cls += " pc-sort-active"
+    if sticky:
+        cls += " pc-sticky-prop pc-sticky-head"
+    if sticky_end:
+        cls += " pc-sticky-verdict pc-sticky-verdict-head"
+    inner = f"{html.escape(label)}{arrow}"
+    return f'<a class="{cls}" href="{html.escape(href)}">{inner}</a>'
+
+
+def _fraction_10(series: pd.Series) -> pd.Series:
+    extracted = series.astype(str).str.extract(r"([\d.]+)\s*/\s*10", expand=False)
+    return pd.to_numeric(extracted, errors="coerce")
+
+
+def _potential_sort_series(
+    df: pd.DataFrame,
+    *,
+    label_column: str,
+    score_column: str,
+) -> pd.Series:
+    """Numeric sort key aligned with Appreciation / Rental cells (X/10 labels, then category score)."""
+    labels = df.get(label_column, pd.Series("", index=df.index))
+    from_label = _fraction_10(labels)
+    scores = pd.to_numeric(
+        df.get(score_column, pd.Series(dtype=float, index=df.index)),
+        errors="coerce",
+    )
+    return from_label.where(from_label.notna(), scores)
+
+
+def _flood_rank(series: pd.Series) -> pd.Series:
+    def rank(cell: object) -> int:
+        text = str(cell or "")
+        if "🔴" in text or text.startswith("High"):
+            return 3
+        if "🟡" in text or text.startswith("Moderate"):
+            return 2
+        if "🟢" in text or text.startswith("Low"):
+            return 1
+        return 0
+
+    return series.map(rank)
+
+
+def _neighbourhood_name_sort_series(df: pd.DataFrame) -> pd.Series:
+    if "Neighbourhood display" in df.columns:
+        return df["Neighbourhood display"].fillna("").astype(str).str.lower()
+    return (
+        df.get("City", pd.Series("", index=df.index)).fillna("").astype(str)
+        + ", "
+        + df.get("State", pd.Series("", index=df.index)).fillna("").astype(str)
+    ).str.lower()
+
+
+def _neighbourhood_tier_sort_series(df: pd.DataFrame) -> pd.Series:
+    if "Neighbourhood tier" in df.columns:
+        tiers = pd.to_numeric(df["Neighbourhood tier"], errors="coerce")
+    else:
+        tiers = df.get("Neighbourhood display", pd.Series("", index=df.index)).map(
+            neighbourhood_search_tier
+        )
+    return tiers.fillna(99)
+
+
+def _commute_sort_series(df: pd.DataFrame) -> pd.Series:
+    if "Commute (min)" in df.columns:
+        return pd.to_numeric(df["Commute (min)"], errors="coerce")
+    walk = df.get("Walk to Station", pd.Series("", index=df.index)).astype(str)
+    mins = walk.str.extract(r"(\d+)", expand=False)
+    return pd.to_numeric(mins, errors="coerce")
+
+
+def sort_compare_dataframe(
+    df: pd.DataFrame,
+    sort_key: str,
+    *,
+    ascending: bool,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    key = sort_key.lower()
+
+    if key == "property":
+        series = out["Property ID"].astype(str).str.lower()
+        return out.assign(_sort=series).sort_values("_sort", ascending=ascending, na_position="last").drop(
+            columns="_sort"
+        )
+    if key == "location":
+        tier_series = _neighbourhood_tier_sort_series(out)
+        name_series = _neighbourhood_name_sort_series(out)
+        return out.assign(_tier=tier_series, _name=name_series).sort_values(
+            ["_tier", "_name"],
+            ascending=[ascending, True],
+            na_position="last",
+        ).drop(columns=["_tier", "_name"])
+    if key == "price":
+        return out.sort_values("Price", ascending=ascending, na_position="last")
+    if key == "house_size":
+        if "House Size" in out.columns:
+            return out.sort_values("House Size", ascending=ascending, na_position="last")
+    if key == "lot_size":
+        if "Land Size" in out.columns:
+            return out.sort_values("Land Size", ascending=ascending, na_position="last")
+    if key == "hoa":
+        return out.sort_values("HOA", ascending=ascending, na_position="last")
+    if key == "units":
+        col = "Legal Units" if "Legal Units" in out.columns else "Units"
+        if col in out.columns:
+            return out.sort_values(col, ascending=ascending, na_position="last")
+    if key == "gross_rent":
+        if "Estimated Rent" in out.columns:
+            return out.sort_values("Estimated Rent", ascending=ascending, na_position="last")
+    if key == "net_yield":
+        if "Est. net yield %" in out.columns:
+            return out.sort_values("Est. net yield %", ascending=ascending, na_position="last")
+    if key == "trailer":
+        if "Trailer" in out.columns:
+            return out.sort_values(
+                "Trailer",
+                ascending=ascending,
+                na_position="last",
+                key=lambda s: s.astype(str).str.lower(),
+            )
+    if key == "flood":
+        return out.assign(_sort=_flood_rank(out.get("Flood", pd.Series("", index=out.index)))).sort_values(
+            "_sort", ascending=ascending, na_position="last"
+        ).drop(columns="_sort")
+    if key == "transit_now":
+        return out.assign(_sort=_commute_sort_series(out)).sort_values(
+            "_sort", ascending=ascending, na_position="last"
+        ).drop(columns="_sort")
+    if key == "transit_future":
+        if "Transit future" in out.columns:
+            return out.sort_values(
+                "Transit future",
+                ascending=ascending,
+                na_position="last",
+                key=lambda s: s.astype(str).str.lower(),
+            )
+    if key == "appreciation":
+        series = _potential_sort_series(
+            out, label_column="Appreciation label", score_column="Appreciation"
+        )
+        return out.assign(_sort=series).sort_values(
+            "_sort", ascending=ascending, na_position="last"
+        ).drop(columns="_sort")
+    if key == "rental":
+        series = _potential_sort_series(
+            out, label_column="Rental potential", score_column="Rental"
+        )
+        return out.assign(_sort=series).sort_values(
+            "_sort", ascending=ascending, na_position="last"
+        ).drop(columns="_sort")
+    if key == "verdict":
+        verdicts = out.get("Verdict", pd.Series("", index=out.index)).astype(str).str.strip()
+        order = verdicts.map(_VERDICT_ORDER).fillna(99)
+        overall = out["Overall"] if "Overall" in out.columns else pd.Series(0.0, index=out.index)
+        return out.assign(_sort=order).sort_values(
+            ["_sort", "Overall"],
+            ascending=[ascending, False],
+            na_position="last",
+        ).drop(columns="_sort")
+    if key == "overall" and "Overall" in out.columns:
+        return out.sort_values("Overall", ascending=ascending, na_position="last")
+    return out.sort_values("Overall", ascending=False, na_position="last")
+
+
+def _clipped_cell(text: str, *, lines: int = 1) -> str:
+    safe = html.escape(str(text or "—").strip() or "—")
+    title = html.escape(str(text or "").strip())
+    title_attr = f' title="{title}"' if title else ""
+    if lines > 1:
+        return f'<div class="pc-cell-clamp"{title_attr}>{safe}</div>'
+    return f'<div class="pc-cell-clip"{title_attr}>{safe}</div>'
+
+
+def _sqft_label(value: object) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "—"
+    try:
+        sqft = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if sqft <= 0:
+        return "—"
+    return f"{int(round(sqft)):,} sf"
+
+
+def _neighbourhood_label(row: pd.Series) -> str:
+    hood = str(row.get("Neighbourhood display") or "").strip()
+    if hood and hood not in ("—", "nan", "None"):
+        return hood
+    city = str(row.get("City") or "").strip()
+    state = str(row.get("State") or "").strip()
+    return f"{city}, {state}".strip(" ,") or "—"
+
+
+def _hood_tier(row: pd.Series) -> int | None:
+    tier = row.get("Neighbourhood tier")
+    if tier is not None and not (isinstance(tier, float) and pd.isna(tier)):
+        try:
+            return int(tier)
+        except (TypeError, ValueError):
+            pass
+    return neighbourhood_search_tier(_neighbourhood_label(row))
+
+
+def _hood_badge_html(row: pd.Series) -> str:
+    return theme_css.hood_tier_badge_html(_neighbourhood_label(row), _hood_tier(row))
 
 
 def num(value: object, fmt: str = "{:,.0f}", fallback: str = "—") -> str:
@@ -163,13 +453,11 @@ def render_property_dialog(row: pd.Series) -> None:
         with left:
             st.image(str(photo_path), width="stretch")
         with right:
-            theme_css.chips(
-                [
-                    f"{row.get('City', '')}, {row.get('State', '')}",
-                    str(row.get("Recommendation", "")),
-                    f"Overall {num(row.get('Overall'), '{:.1f}')}/10",
-                    f"{row.get('Region', '')}",
-                ]
+            theme_css.chip_row(
+                _hood_badge_html(row),
+                f'<span class="pc-chip">{html.escape(str(row.get("Recommendation", "")))}</span>',
+                f'<span class="pc-chip">Overall {html.escape(num(row.get("Overall"), "{:.1f}"))}/10</span>',
+                f'<span class="pc-chip">{html.escape(str(row.get("Region", "")))}</span>',
             )
             theme_css.kpi_grid(
                 [
@@ -181,13 +469,11 @@ def render_property_dialog(row: pd.Series) -> None:
                 min_width="150px",
             )
     else:
-        theme_css.chips(
-            [
-                f"{row.get('City', '')}, {row.get('State', '')}",
-                str(row.get("Recommendation", "")),
-                f"Overall {num(row.get('Overall'), '{:.1f}')}/10",
-                f"{row.get('Region', '')}",
-            ]
+        theme_css.chip_row(
+            _hood_badge_html(row),
+            f'<span class="pc-chip">{html.escape(str(row.get("Recommendation", "")))}</span>',
+            f'<span class="pc-chip">Overall {html.escape(num(row.get("Overall"), "{:.1f}"))}/10</span>',
+            f'<span class="pc-chip">{html.escape(str(row.get("Region", "")))}</span>',
         )
         theme_css.kpi_grid(
             [
@@ -274,43 +560,31 @@ def render_compare_table(df: pd.DataFrame) -> None:
         st.info("No properties match the current filters.", icon=":material/filter_alt_off:")
         return
 
-    ranked = df.sort_values("Overall", ascending=False, na_position="last").reset_index(drop=True)
-    headers = [
-        "Property",
-        "Location",
-        "Price",
-        "HOA / mo",
-        "Units",
-        "Est. gross rent",
-        "Est. net yield",
-        "Garage / trailer",
-        "Flood risk",
-        "Current transit",
-        "Future transit",
-        "Appreciation",
-        "Rental",
-        "Match",
-        "Verdict",
-    ]
+    sort_key, sort_asc = _sync_compare_sort()
+    ranked = sort_compare_dataframe(df, sort_key, ascending=sort_asc).reset_index(drop=True)
 
     with theme_css.card("table"):
         st.caption(
-            "Est. net yield is (annual rent − taxes − insurance − HOA×12) ÷ price. "
-            "Re-analyze a listing to fill HOA, units, flood risk, and future transit."
+            "Click a column header to sort (click again to reverse). "
+            "Est. net yield is (annual rent − annual tax − insurance − HOA×12) ÷ price."
         )
+        n_cols = len(COMPARE_TABLE_HEADERS)
         head_cells = [
-            f'<div class="pc-sticky-prop pc-sticky-head">{html.escape(headers[0])}</div>',
-            *[f"<span>{html.escape(label)}</span>" for label in headers[1:]],
+            _sort_header_link(
+                label,
+                key,
+                sticky=(idx == 0),
+                sticky_end=(idx == n_cols - 1),
+            )
+            for idx, (label, key) in enumerate(COMPARE_TABLE_HEADERS)
         ]
         head = "".join(head_cells)
+        grid_attr = theme_css.compare_grid_style_attr()
         bodies: list[str] = []
         for _, row in ranked.iterrows():
             thumb = ensure_thumbnail(str(row["Property ID"]))
             name_html = property_title_html(
                 readable_property_name(row["Property ID"]), row.get("Link")
-            )
-            location = html.escape(
-                f"{row.get('City', '')}, {row.get('State', '')}".strip(" ,") or "—"
             )
             verdict = str(row.get("Verdict") or "—")
             match = row.get("Match /100")
@@ -319,11 +593,6 @@ def render_compare_table(df: pd.DataFrame) -> None:
             score_pct = int(min(max(score / 10.0, 0.0), 1.0) * 100)
             vclass = theme_css.verdict_class(verdict)
             flood = str(row.get("Flood") or "—")
-            flood_class = {
-                "🟢 Low": "pc-flood-low",
-                "🟡 Moderate": "pc-flood-mod",
-                "🔴 High": "pc-flood-high",
-            }.get(flood, "")
             thumb_inner = (
                 f'<img class="pc-thumb" src="/app/static/property_thumbs/{html.escape(thumb.name)}" alt="" />'
                 if thumb is not None
@@ -332,7 +601,7 @@ def render_compare_table(df: pd.DataFrame) -> None:
             sticky_prop = (
                 f'<div class="pc-sticky-prop">{thumb_inner}'
                 f'<div class="pc-sticky-prop-text">{name_html}'
-                f"<div class='pc-prop-sub'>{html.escape(str(row.get('Region') or ''))}</div>"
+                f"<div class='pc-prop-sub pc-cell-hood-clip'>{_hood_badge_html(row)}</div>"
                 f"</div></div>"
             )
             net = row.get("Est. net yield %")
@@ -343,18 +612,20 @@ def render_compare_table(df: pd.DataFrame) -> None:
             pid = html.escape(str(row["Property ID"]))
             cells = [
                 sticky_prop,
-                f"<div class='pc-cell'>{location}</div>",
+                f"<div class='pc-cell pc-cell-hood-clip'>{_hood_badge_html(row)}</div>",
                 f"<div class='pc-cell-strong'>${html.escape(num(row.get('Price')))}</div>",
+                f"<div class='pc-cell'>{_clipped_cell(_sqft_label(row.get('House Size')))}</div>",
+                f"<div class='pc-cell'>{_clipped_cell(_sqft_label(row.get('Land Size')))}</div>",
                 f"<div class='pc-cell'>{html.escape(hoa_label)}</div>",
-                f"<div class='pc-cell'>{html.escape(str(row.get('Units') or '—'))}</div>",
-                f"<div class='pc-cell'>{html.escape(str(row.get('Gross rent label') or '—'))}</div>",
-                f"<div class='pc-cell-strong'>{html.escape(net_label)}</div>",
-                f"<div class='pc-cell'>{html.escape(str(row.get('Trailer') or '—'))}</div>",
-                f"<div class='pc-cell {flood_class}'>{html.escape(flood)}</div>",
-                f"<div class='pc-cell'>{html.escape(str(row.get('Transit now') or '—'))}</div>",
-                f"<div class='pc-cell'>{html.escape(str(row.get('Transit future') or '—'))}</div>",
-                f"<div class='pc-cell'>{html.escape(str(row.get('Appreciation label') or '—'))}</div>",
-                f"<div class='pc-cell'>{html.escape(str(row.get('Rental potential') or '—'))}</div>",
+                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Units') or '—'))}</div>",
+                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Gross rent label') or '—'))}</div>",
+                f"<div class='pc-cell-strong'>{_clipped_cell(net_label)}</div>",
+                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Trailer') or '—'))}</div>",
+                f"<div class='pc-cell'>{theme_css.flood_risk_badge_html(flood)}</div>",
+                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Transit now') or '—'))}</div>",
+                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Transit future') or '—'))}</div>",
+                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Appreciation label') or '—'))}</div>",
+                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Rental potential') or '—'))}</div>",
                 (
                     "<div class='pc-match'>"
                     f"<div class='pc-match-val'>{html.escape(match_label)}</div>"
@@ -362,14 +633,19 @@ def render_compare_table(df: pd.DataFrame) -> None:
                     "</div>"
                 ),
                 (
-                    f"<div><span class='pc-verdict {vclass}'>{html.escape(verdict)}</span>"
+                    f"<div class='pc-sticky-verdict'><span class='pc-verdict {vclass}'>"
+                    f"{html.escape(verdict)}</span>"
                     f"<div class='pc-prop-sub'><a href='?detail={pid}'>Details</a></div></div>"
                 ),
             ]
-            bodies.append(f'<div class="pc-compare-row">{"".join(cells)}</div>')
+            if len(cells) != n_cols:
+                raise RuntimeError(
+                    f"Compare table column mismatch: {len(cells)} cells vs {n_cols} headers"
+                )
+            bodies.append(f'<div class="pc-compare-row"{grid_attr}>{"".join(cells)}</div>')
         st.html(
             '<div class="pc-compare-wrap">'
-            f'<div class="pc-compare-head">{head}</div>'
+            f'<div class="pc-compare-head"{grid_attr}>{head}</div>'
             + "".join(bodies)
             + "</div>"
         )
@@ -786,7 +1062,11 @@ theme_css.hero(
 all_regions = list_regions()
 
 try:
-    raw = cached_load_properties(tuple(all_regions), _sheets_cache_generation())
+    raw = cached_load_properties(
+        tuple(all_regions),
+        _sheets_cache_generation(),
+        RULES_VERSION,
+    )
 except Exception as exc:  # noqa: BLE001
     st.error(f"Could not load your Google Sheet: {exc}", icon=":material/cloud_off:")
     st.link_button("Open Google Sheets", sheet_url(), icon=":material/open_in_new:")
@@ -799,6 +1079,8 @@ if raw.empty:
     )
     st.link_button("Open Google Sheets", sheet_url(), icon=":material/open_in_new:")
     st.stop()
+
+raw = add_derived_columns(raw)
 
 region_tab_labels = [*all_regions, ALL_PROPERTIES_TAB]
 _region_counts = raw.groupby("Region", sort=False).size().to_dict()

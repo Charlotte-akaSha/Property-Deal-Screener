@@ -1,16 +1,22 @@
 # AI Real Estate Acquisition Assistant
 
-Local Streamlit portal that extracts facts from a listing (text + up to 5 screenshots), scores the property against your investment strategy with Gemini, saves a timestamped local archive, and upserts a row into a shared Google Sheet.
+Local Streamlit portal that extracts facts from a listing (text + up to 5 screenshots), scores the property against your investment strategy with **Google Gemini**, saves a timestamped local archive, and upserts a row into a shared Google Sheet.
 
 ## Setup
 
 1. **Clone** this repo to a local (non-iCloud) path for day-to-day work.
-2. Create a virtualenv and install deps:
+2. Create a virtualenv and install deps (macOS often has no `pip` command — use `python3 -m pip`):
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
+```
+
+Without a venv:
+
+```bash
+python3 -m pip install -r requirements.txt
 ```
 
 3. Copy env template and fill in secrets:
@@ -19,7 +25,8 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-4. **Gemini:** create an API key and set `GEMINI_API_KEY`. Optionally set `GEMINI_MODEL` (default `gemini-3.6-flash`). Multimodal calls cost more than text-only; the portal caps uploads at **5 images**.
+4. **Gemini (required for analysis):** set `GEMINI_API_KEY` in `.env` ([Google AI Studio](https://aistudio.google.com/apikey)). Optional: `GEMINI_MODEL` (default `gemini-3.6-flash`). Analysis uses Gemini unless you set `ANALYSIS_BACKEND=composer` — see **[docs/composer-setup.md](docs/composer-setup.md)** for that optional path.
+
 5. **Google Maps (transit columns):**
    - In the same Google Cloud project, enable **Geocoding**, **Places**, **Distance Matrix**, and **Directions** APIs.
    - Create or reuse an API key; set `GOOGLE_MAPS_API_KEY` in `.env`.
@@ -70,7 +77,17 @@ Pasting the same listing twice with different labels can create two Property IDs
 ## Credentials check
 
 ```bash
-python scripts/check_credentials.py
+python3 scripts/check_credentials.py
+python3 scripts/check_composer.py   # only if ANALYSIS_BACKEND=composer
+```
+
+## Bulk ingest (queued Zillow listings)
+
+With `GEMINI_API_KEY` set (and Sheets/Maps configured as needed):
+
+```bash
+python3 scripts/ingest_pending_listings.py
+python3 scripts/ingest_pending_listings.py --only Whitethorne
 ```
 
 ## Offline smoke test

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import html as _html
+import inspect
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 # Soft pastel accents for KPI icon wells (tint, icon)
 ACCENTS = {
@@ -15,6 +17,17 @@ ACCENTS = {
     "rose": ("#F7E9EB", "#D4717A"),
     "amber": ("#F6F0E4", "#C9A227"),
 }
+
+# Must match len(COMPARE_TABLE_HEADERS) in app_pages/compare.py (17 columns).
+COMPARE_GRID_TEMPLATE = (
+    "minmax(220px, 260px) minmax(152px, 1.15fr) 92px 76px 76px 72px 48px "
+    "minmax(124px, 1fr) 70px 92px 108px minmax(120px, 1fr) 108px 78px 78px 58px 118px"
+)
+
+
+def compare_grid_style_attr() -> str:
+    return f' style="grid-template-columns:{COMPARE_GRID_TEMPLATE}"'
+
 
 _CSS = """
 <style>
@@ -491,8 +504,46 @@ a.pc-prop-link:hover {
 .pc-prop-sub {
   color: var(--pc-muted); font-size: 0.75rem; margin-top: 2px;
 }
-.pc-cell { font-size: 0.875rem; color: var(--pc-text); font-weight: 500; }
-.pc-cell-strong { font-size: 0.9rem; color: var(--pc-text); font-weight: 700; }
+.pc-hood-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px;
+  font-size: 0.72rem; font-weight: 600; line-height: 1.35;
+  max-width: 100%;
+}
+.pc-cell-hood-clip {
+  overflow: hidden;
+  max-width: 100%;
+}
+.pc-cell-hood-clip .pc-hood-badge {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-cell {
+  font-size: 0.875rem; color: var(--pc-text); font-weight: 500;
+  min-width: 0; max-width: 100%; overflow: hidden;
+}
+.pc-cell-strong {
+  font-size: 0.9rem; color: var(--pc-text); font-weight: 700;
+  min-width: 0; max-width: 100%; overflow: hidden;
+}
+.pc-cell-clip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.pc-cell-clamp {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  word-break: break-word;
+  line-height: 1.3;
+  max-width: 100%;
+}
 .pc-match {
   display: flex; flex-direction: column; gap: 4px;
 }
@@ -519,13 +570,15 @@ a.pc-prop-link:hover {
 }
 .pc-compare-head, .pc-compare-row {
   display: grid;
-  grid-template-columns:
-    minmax(220px, 260px) minmax(96px, 0.9fr) 84px 72px 48px minmax(124px, 1fr)
-    70px 92px 108px minmax(120px, 1fr) 108px 78px 78px 58px 118px;
+  grid-template-columns: /*COMPARE_GRID_TEMPLATE*/;
   gap: 8px;
   align-items: center;
-  min-width: 1620px;
+  min-width: 1872px;
   padding: 8px 10px;
+}
+.pc-compare-head > *,
+.pc-compare-row > * {
+  min-width: 0;
 }
 .pc-compare-head {
   color: var(--pc-muted);
@@ -536,9 +589,38 @@ a.pc-prop-link:hover {
   border-bottom: 1px solid var(--pc-line);
 }
 .pc-compare-head > span { padding: 2px 0; }
+a.pc-sort-link {
+  color: var(--pc-muted);
+  text-decoration: none;
+  cursor: pointer;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+a.pc-sort-link:hover { color: var(--pc-accent); }
+a.pc-sort-link.pc-sort-active { color: var(--pc-text); }
+.pc-sticky-head.pc-sort-link { display: block; }
 .pc-compare-row { border-bottom: 1px solid var(--pc-line); }
 .pc-compare-row:hover { background: #FAFBFE; }
 .pc-compare-row:hover .pc-sticky-prop { background: #FAFBFE; }
+.pc-sticky-verdict {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  min-width: 0;
+  background: #fff;
+  padding-left: 10px;
+  margin-left: 2px;
+  box-shadow: -6px 0 10px -8px rgba(30, 35, 55, 0.35);
+}
+.pc-compare-row:hover .pc-sticky-verdict { background: #FAFBFE; }
+a.pc-sort-link.pc-sticky-verdict-head {
+  display: block;
+  text-align: right;
+  box-shadow: none;
+  padding-left: 0;
+}
 .pc-flood-low { color: #2F7A6E; font-weight: 600; }
 .pc-flood-mod { color: #9A6B12; font-weight: 600; }
 .pc-flood-high { color: #B04E58; font-weight: 600; }
@@ -607,10 +689,23 @@ _FAVICON_SCRIPT = """
 </script>
 """
 
+_CSS = _CSS.replace("/*COMPARE_GRID_TEMPLATE*/", COMPARE_GRID_TEMPLATE)
+
+
+def _st_html(markup: str, *, allow_javascript: bool = False) -> None:
+    """st.html with JS on newer Streamlit; components.html fallback on 1.50 and older."""
+    if allow_javascript and "unsafe_allow_javascript" not in inspect.signature(st.html).parameters:
+        components.html(markup, height=0)
+        return
+    if allow_javascript:
+        st.html(markup, unsafe_allow_javascript=True)
+    else:
+        st.html(markup)
+
 
 def inject() -> None:
-    st.html(_CSS)
-    st.html(_FAVICON_SCRIPT, unsafe_allow_javascript=True)
+    _st_html(_CSS)
+    _st_html(_FAVICON_SCRIPT, allow_javascript=True)
 
 
 def card(key: str, **kwargs):
@@ -705,11 +800,83 @@ def section(title: str, icon: str, accent: str = "violet") -> None:
     )
 
 
+_HOOD_BADGE_BASE = (
+    "display:inline-flex;align-items:center;gap:4px;padding:2px 8px;"
+    "border-radius:999px;font-size:0.72rem;font-weight:600;line-height:1.35;"
+    "max-width:100%;"
+)
+_HOOD_INLINE: dict[int | None, str] = {
+    1: "background:#3A8F82;color:#F4FBFA;",
+    2: "background:#D8F0EB;color:#1F6B5F;",
+    3: "background:#FFF6DB;color:#8A6A12;",
+    4: "background:#FFF0E6;color:#B35A24;",
+    5: "background:#F7E9EB;color:#B04E58;",
+    None: "background:#EEF0F6;color:#5A6278;",
+}
+
+
+def hood_tier_class(tier: int | None) -> str:
+    return {
+        1: "pc-hood-p1",
+        2: "pc-hood-p2",
+        3: "pc-hood-p3",
+        4: "pc-hood-p4",
+        5: "pc-hood-p5",
+    }.get(tier or 0, "pc-hood-unknown")
+
+
+def hood_tier_badge_html(label: str, tier: int | None) -> str:
+    from neighbourhood_tiers import tier_emoji, tier_short_label
+
+    text = str(label or "—").strip() or "—"
+    emoji = tier_emoji(tier)
+    display = f"{emoji} {text}".strip() if emoji else text
+    cls = hood_tier_class(tier)
+    tip = tier_short_label(tier)
+    title = f' title="{_html.escape(tip)}"' if tip else ""
+    style = _HOOD_BADGE_BASE + _HOOD_INLINE.get(tier, _HOOD_INLINE[None])
+    return (
+        f'<span class="pc-hood-badge {cls}" style="{style}"{title}>'
+        f"{_html.escape(display)}</span>"
+    )
+
+
+_FLOOD_INLINE: dict[str, str] = {
+    "Low": "background:#E6F4F1;color:#1F6B5F;",
+    "Moderate": "background:#FFF6DB;color:#8A6A12;",
+    "High": "background:#F7E9EB;color:#B04E58;",
+}
+_FLOOD_BADGE_BASE = (
+    "display:inline-flex;align-items:center;gap:4px;padding:2px 8px;"
+    "border-radius:999px;font-size:0.72rem;font-weight:600;line-height:1.35;"
+    "max-width:100%;white-space:normal;"
+)
+
+
+def flood_risk_badge_html(display_text: str) -> str:
+    text = str(display_text or "—").strip() or "—"
+    if text == "—":
+        return f'<span style="{_FLOOD_BADGE_BASE}background:#EEF0F6;color:#5A6278;">—</span>'
+    label = "High" if "🔴" in text or text.startswith("High") else (
+        "Moderate" if "🟡" in text or text.startswith("Moderate") else (
+            "Low" if "🟢" in text or text.startswith("Low") else ""
+        )
+    )
+    style = _FLOOD_BADGE_BASE + _FLOOD_INLINE.get(label, "background:#EEF0F6;color:#5A6278;")
+    return f'<span class="pc-flood-badge" style="{style}">{_html.escape(text)}</span>'
+
+
+def chip_row(*fragments: str) -> None:
+    if not fragments:
+        return
+    st.html(f'<div class="pc-chip-row">{"".join(fragments)}</div>')
+
+
 def chips(items: list[str]) -> None:
     if not items:
         return
     inner = "".join(f'<span class="pc-chip">{_html.escape(str(i))}</span>' for i in items)
-    st.html(f'<div class="pc-chip-row">{inner}</div>')
+    chip_row(inner)
 
 
 def table_header(columns: list[str]) -> None:

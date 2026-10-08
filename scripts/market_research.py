@@ -3,21 +3,29 @@
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from google.genai import types
 
 from utils import (
+    analysis_backend,
+    generate_analysis_json,
     generate_content_with_retry,
-    generate_json_with_retry,
     get_gemini_client,
     get_model_name,
+    load_env,
     load_prompt,
     load_schema,
-    model_candidates,
     parse_json_response,
     validate_against_schema,
 )
+
+_DEFAULT_SEARCH_TIMEOUT_SEC = 90.0
+_SEARCH_MAX_RETRIES = 2
+_JSON_MAX_RETRIES = 2
 
 
 def _location_line(extracted: dict[str, Any]) -> str:
@@ -71,6 +79,33 @@ def _empty_research() -> dict[str, str]:
     }
 
 
+def _use_web_search() -> bool:
+    load_env()
+    val = os.getenv("MARKET_RESEARCH_USE_SEARCH", "false").strip().lower()
+    return val in ("1", "true", "yes")
+
+
+def _search_timeout_sec() -> float:
+    load_env()
+    raw = os.getenv("MARKET_RESEARCH_SEARCH_TIMEOUT_SEC", "").strip()
+    if not raw:
+        return _DEFAULT_SEARCH_TIMEOUT_SEC
+    try:
+        return max(30.0, float(raw))
+    except ValueError:
+        return _DEFAULT_SEARCH_TIMEOUT_SEC
+
+
+def _gemini_research_model() -> str:
+    load_env()
+    return os.getenv("MARKET_RESEARCH_MODEL", "").strip() or get_model_name()
+
+
+def _report(progress: Callable[[str], None] | None, message: str) -> None:
+    if progress:
+        progress(message)
+
+
 def _with_search(client: Any, user_parts: list[str], schema: dict[str, Any]) -> dict[str, Any]:
     prompt = load_prompt("market_research_prompt.md")
     contents: list[Any] = [
@@ -83,21 +118,29 @@ def _with_search(client: Any, user_parts: list[str], schema: dict[str, Any]) -> 
         tools=[types.Tool(google_search=types.GoogleSearch())],
         temperature=0.2,
     )
-    last_error: Exception | None = None
-    for model in model_candidates() or [get_model_name()]:
-        try:
-            response = generate_content_with_retry(
-                client, model=model, contents=contents, config=config
-            )
-            data = parse_json_response(response.text or "")
-            if not isinstance(data, dict):
-                raise ValueError("Market research returned non-object JSON.")
-            validate_against_schema(data, schema)
-            return data
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            continue
-    raise RuntimeError("Market research with search failed") from last_error
+    model = _gemini_research_model()
+    response = generate_content_with_retry(
+        client,
+        model=model,
+        contents=contents,
+        config=config,
+        max_retries=_SEARCH_MAX_RETRIES,
+    )
+    data = parse_json_response(response.text or "")
+    if not isinstance(data, dict):
+        raise ValueError("Market research returned non-object JSON.")
+    validate_against_schema(data, schema)
+    return data
+
+
+def _json_research(prompt: str, parts: list[str], schema: dict[str, Any]) -> dict[str, Any]:
+    return generate_analysis_json(
+        system_prompt=prompt,
+        text_parts=parts,
+        schema=schema,
+        models=[_gemini_research_model()],
+        content_max_retries=_JSON_MAX_RETRIES,
+    )
 
 
 def research_market(
@@ -105,18 +148,35 @@ def research_market(
     *,
     transit: dict[str, Any] | None = None,
     sheet_tab: str | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> dict[str, str]:
     """Research neighbourhood, appreciation, and rental demand for this address."""
     schema = load_schema("market_research_schema.json")
     prompt = load_prompt("market_research_prompt.md")
     parts = _user_parts(extracted, transit, sheet_tab)
-    client = get_gemini_client()
-    try:
-        data = _with_search(client, parts, schema)
-    except Exception:
-        data = generate_json_with_retry(
-            client, system_prompt=prompt, user_parts=parts, schema=schema
+    data: dict[str, Any]
+    backend = analysis_backend()
+    if backend == "gemini" and _use_web_search():
+        client = get_gemini_client()
+        timeout = _search_timeout_sec()
+        _report(
+            progress,
+            f"Searching web for neighbourhood and rental data (up to {int(timeout)}s)…",
         )
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_with_search, client, parts, schema)
+                data = future.result(timeout=timeout)
+        except FuturesTimeoutError:
+            _report(progress, "Web search timed out — using Gemini research…")
+            data = _json_research(prompt, parts, schema)
+        except Exception:
+            _report(progress, "Web search failed — using Gemini research…")
+            data = _json_research(prompt, parts, schema)
+    else:
+        _report(progress, "Researching neighbourhood and rental market…")
+        data = _json_research(prompt, parts, schema)
+
     out = _empty_research()
     for key in out:
         out[key] = str(data.get(key) or "").strip()

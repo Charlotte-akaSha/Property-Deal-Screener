@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -18,12 +19,13 @@ from scoring import compute_overall, parse_weights
 from utils import (
     MAX_PHOTOS,
     ROOT,
+    analysis_backend,
+    analysis_fast_model,
     discover_images,
-    generate_json_with_retry,
-    get_gemini_client,
-    image_parts_from_paths,
-    image_parts_from_uploads,
+    fast_analysis_mode,
+    generate_analysis_json,
     load_columbus_transit_reference,
+    merge_json_schemas,
     load_prompt,
     load_schema,
     COLUMBUS_REGION,
@@ -74,21 +76,20 @@ def extract_facts(
     image_paths: list[Path] | None = None,
     image_uploads: list[tuple[str, bytes]] | None = None,
 ) -> dict[str, Any]:
-    client = get_gemini_client()
     schema = load_schema("extraction_schema.json")
     prompt = load_prompt("extraction_prompt.md")
-    user_parts: list[Any] = [
+    text_parts = [
         "Listing URL (may be empty):\n" + (link or "(none)"),
         "Listing text:\n" + listing_text,
     ]
     if user_comments.strip():
-        user_parts.append("User comments (investor notes):\n" + user_comments.strip())
-    if image_uploads:
-        user_parts.extend(image_parts_from_uploads(image_uploads))
-    elif image_paths:
-        user_parts.extend(image_parts_from_paths(image_paths))
-    extracted = generate_json_with_retry(
-        client, system_prompt=prompt, user_parts=user_parts, schema=schema
+        text_parts.append("User comments (investor notes):\n" + user_comments.strip())
+    extracted = generate_analysis_json(
+        system_prompt=prompt,
+        text_parts=text_parts,
+        schema=schema,
+        image_uploads=image_uploads,
+        image_paths=image_paths,
     )
     if link and not extracted.get("link"):
         extracted["link"] = link
@@ -104,11 +105,20 @@ def score_property(
     user_comments: str = "",
     sheet_tab: str | None = None,
     market_research: dict[str, str] | None = None,
+    combine_market_research: bool = False,
 ) -> dict[str, Any]:
-    client = get_gemini_client()
     prompt_name, schema_name = scoring_files_for_region(sheet_tab)
     schema = load_schema(schema_name)
     prompt = load_prompt(prompt_name)
+    if combine_market_research:
+        schema = merge_json_schemas(schema, load_schema("market_research_schema.json"))
+        prompt = (
+            prompt
+            + "\n\n---\n\n"
+            + load_prompt("market_research_prompt.md")
+            + "\n\nInclude neighbourhood_name, neighbourhood, appreciation, and rental "
+            "in the same JSON response as the scores."
+        )
     strategy_md = load_strategy_raw_for_region(sheet_tab)
     strategy = strategy_rules_without_weights(strategy_md)
     weights = parse_weights(strategy_md)
@@ -135,9 +145,21 @@ def score_property(
             "User comments (investor notes — weigh alongside extracted facts when scoring):\n"
             + user_comments.strip()
         )
-    scored_raw = generate_json_with_retry(
-        client, system_prompt=prompt, user_parts=user_parts, schema=schema
+    fast_model = [analysis_fast_model()] if combine_market_research and analysis_fast_model() else None
+    scored_raw = generate_analysis_json(
+        system_prompt=prompt,
+        text_parts=[str(p) for p in user_parts],
+        schema=schema,
+        models=fast_model,
+        content_max_retries=2 if combine_market_research else None,
     )
+    if combine_market_research:
+        market_research = {
+            "neighbourhood_name": str(scored_raw.get("neighbourhood_name") or ""),
+            "neighbourhood": str(scored_raw.get("neighbourhood") or ""),
+            "appreciation": str(scored_raw.get("appreciation") or ""),
+            "rental": str(scored_raw.get("rental") or ""),
+        }
     overall = compute_overall(scored_raw["categories"], weights)
     result: dict[str, Any] = {
         "categories": scored_raw["categories"],
@@ -160,6 +182,11 @@ def score_property(
     if sheet_tab:
         result["region"] = sheet_tab
     return result
+
+
+def _report_progress(progress: Callable[[str], None] | None, message: str) -> None:
+    if progress:
+        progress(message)
 
 
 def save_listing_inputs(
@@ -193,6 +220,7 @@ def analyze_from_memory(
     image_uploads: list[tuple[str, bytes]] | None = None,
     sheet_tab: str | None = None,
     skip_sheets: bool = False,
+    progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Portal path: extract first, then create folder, score, persist, Sheets."""
     if not listing_text.strip():
@@ -201,6 +229,7 @@ def analyze_from_memory(
         raise ValueError(f"At most {MAX_PHOTOS} photos allowed.")
 
     comments = user_comments.strip()
+    _report_progress(progress, "Extracting facts…")
     extracted = extract_facts(
         listing_text,
         link=link,
@@ -215,27 +244,53 @@ def analyze_from_memory(
         explicit=sheet_tab,
         regions=regions,
     )
-    transit = lookup_transit(extracted, sheet_tab=_region_for_transit(sheet_tab))
     property_id = property_id_from_extracted(extracted, property_label)
     folder = ROOT / "properties" / property_id
-    save_listing_inputs(
-        folder,
-        listing_text=listing_text,
-        link=link,
-        user_comments=comments,
-        image_uploads=image_uploads,
-    )
-    # Brief pause between heavy Gemini calls (extraction → research → scoring).
-    time.sleep(2)
-    research = research_market(extracted, transit=transit, sheet_tab=sheet_tab)
-    time.sleep(2)
-    scored = score_property(
-        extracted,
-        transit=transit,
-        user_comments=comments,
-        sheet_tab=sheet_tab,
-        market_research=research,
-    )
+    transit_region = _region_for_transit(sheet_tab)
+    _report_progress(progress, "Looking up transit and saving listing…")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        transit_future = pool.submit(
+            lookup_transit, extracted, sheet_tab=transit_region
+        )
+        save_future = pool.submit(
+            save_listing_inputs,
+            folder,
+            listing_text=listing_text,
+            link=link,
+            user_comments=comments,
+            image_uploads=image_uploads,
+        )
+        transit = transit_future.result()
+        save_future.result()
+    if fast_analysis_mode():
+        _report_progress(
+            progress,
+            "Scoring + neighbourhood research (one step)…",
+        )
+        scored = score_property(
+            extracted,
+            transit=transit,
+            user_comments=comments,
+            sheet_tab=sheet_tab,
+            combine_market_research=True,
+        )
+    else:
+        _report_progress(progress, "Researching neighbourhood and rental market…")
+        research = research_market(
+            extracted,
+            transit=transit,
+            sheet_tab=sheet_tab,
+            progress=progress,
+        )
+        _report_progress(progress, "Scoring against your strategy…")
+        scored = score_property(
+            extracted,
+            transit=transit,
+            user_comments=comments,
+            sheet_tab=sheet_tab,
+            market_research=research,
+        )
+    _report_progress(progress, "Saving results…")
     analysis = persist_local(
         folder,
         extracted=extracted,
@@ -262,7 +317,11 @@ def analyze_from_memory(
 
 
 def analyze_from_folder(
-    folder: Path, *, sheet_tab: str | None = None, skip_sheets: bool = False
+    folder: Path,
+    *,
+    sheet_tab: str | None = None,
+    skip_sheets: bool = False,
+    progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """CLI path: folder already has listing.txt (+ optional photos)."""
     listing_path = folder / "listing.txt"
@@ -280,6 +339,7 @@ def analyze_from_folder(
         comments_path.read_text(encoding="utf-8").strip() if comments_path.exists() else ""
     )
     images = discover_images(folder)
+    _report_progress(progress, "Extracting facts…")
     extracted = extract_facts(
         text, link=link, user_comments=user_comments, image_paths=images
     )
@@ -292,17 +352,37 @@ def analyze_from_folder(
         regions=regions,
     )
     property_id = folder.name
+    _report_progress(progress, "Looking up transit…")
     transit = lookup_transit(extracted, sheet_tab=_region_for_transit(sheet_tab))
-    time.sleep(2)
-    research = research_market(extracted, transit=transit, sheet_tab=sheet_tab)
-    time.sleep(2)
-    scored = score_property(
-        extracted,
-        transit=transit,
-        user_comments=user_comments,
-        sheet_tab=sheet_tab,
-        market_research=research,
-    )
+    if fast_analysis_mode():
+        _report_progress(
+            progress,
+            "Scoring + neighbourhood research (one step)…",
+        )
+        scored = score_property(
+            extracted,
+            transit=transit,
+            user_comments=user_comments,
+            sheet_tab=sheet_tab,
+            combine_market_research=True,
+        )
+    else:
+        _report_progress(progress, "Researching neighbourhood and rental market…")
+        research = research_market(
+            extracted,
+            transit=transit,
+            sheet_tab=sheet_tab,
+            progress=progress,
+        )
+        _report_progress(progress, "Scoring against your strategy…")
+        scored = score_property(
+            extracted,
+            transit=transit,
+            user_comments=user_comments,
+            sheet_tab=sheet_tab,
+            market_research=research,
+        )
+    _report_progress(progress, "Saving results…")
     analysis = persist_local(
         folder,
         extracted=extracted,

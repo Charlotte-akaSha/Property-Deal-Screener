@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import io
 import json
 import os
 import re
@@ -21,7 +23,8 @@ MAX_PHOTOS = 5
 PROMPT_VERSION = "extraction_v1 / scoring_v1"
 MAX_API_RETRIES = 6
 API_RETRY_BASE_DELAY_SEC = 4.0
-DEFAULT_GEMINI_FALLBACKS = ("gemini-3.6-flash", "gemini-3.8-flash")
+# Avoid auto-falling back to 3.8-flash (separate free-tier daily cap per model).
+DEFAULT_GEMINI_FALLBACKS = ("gemini-3.6-flash",)
 DEPRECATED_GEMINI_MODELS = frozenset(
     {
         "gemini-2.0-flash",
@@ -34,12 +37,105 @@ TRANSIENT_API_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def load_env() -> None:
-    # override=True so edits to .env apply without restarting Streamlit
+    # override=True so edits to .env apply without restarting Streamlit.
+    # Preserve explicit shell exports (e.g. ANALYSIS_BACKEND=gemini for one-off CLI runs).
+    preserved = {
+        k: os.environ[k]
+        for k in ("ANALYSIS_BACKEND",)
+        if os.environ.get(k)
+    }
     load_dotenv(ROOT / ".env", override=True)
+    for key, value in preserved.items():
+        os.environ[key] = value
 
 
 def get_model_name() -> str:
     return os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
+
+
+def analysis_backend() -> str:
+    """LLM for extraction, market research, and scoring (`gemini` or `composer`)."""
+    load_env()
+    backend = os.getenv("ANALYSIS_BACKEND", "gemini").strip().lower()
+    if backend not in ("gemini", "composer"):
+        raise RuntimeError(
+            f"ANALYSIS_BACKEND must be 'gemini' or 'composer', got {backend!r}."
+        )
+    return backend
+
+
+def composer_fallback_to_gemini() -> bool:
+    load_env()
+    raw = os.getenv("COMPOSER_FALLBACK_TO_GEMINI", "").strip().lower()
+    if not raw:
+        return analysis_backend() != "composer"
+    return raw in ("1", "true", "yes")
+
+
+def fast_analysis_mode() -> bool:
+    """One fewer LLM call: market research merged into scoring."""
+    load_env()
+    return os.getenv("ANALYSIS_FAST_MODE", "true").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+
+
+def analysis_fast_model() -> str | None:
+    load_env()
+    if analysis_backend() == "gemini":
+        name = os.getenv("GEMINI_FAST_MODEL", "").strip() or get_model_name()
+        return name or None
+    name = os.getenv("COMPOSER_FAST_MODEL", "").strip() or os.getenv(
+        "COMPOSER_MODEL", ""
+    ).strip()
+    return name or None
+
+
+def compress_images_enabled() -> bool:
+    load_env()
+    return os.getenv("ANALYSIS_FULL_RES_IMAGES", "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def merge_json_schemas(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    out = copy.deepcopy(base)
+    out_props = dict(out.get("properties") or {})
+    out_props.update(extra.get("properties") or {})
+    out["properties"] = out_props
+    required = list(out.get("required") or [])
+    for key in extra.get("required") or []:
+        if key not in required:
+            required.append(key)
+    out["required"] = required
+    return out
+
+
+def compress_image_bytes(
+    data: bytes,
+    *,
+    max_px: int = 1280,
+    jpeg_quality: int = 82,
+) -> tuple[bytes, str]:
+    """Downscale photos for faster multimodal API calls."""
+    with Image.open(io.BytesIO(data)) as img:
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        width, height = img.size
+        longest = max(width, height)
+        if longest > max_px:
+            scale = max_px / longest
+            img = img.resize(
+                (int(width * scale), int(height * scale)),
+                Image.Resampling.LANCZOS,
+            )
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+        return buf.getvalue(), "image/jpeg"
 
 
 def model_candidates() -> list[str]:
@@ -262,22 +358,30 @@ def discover_images(folder: Path) -> list[Path]:
     return files[:MAX_PHOTOS]
 
 
+def _mime_for_suffix(suffix: str) -> str:
+    return {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }.get(suffix.lower(), "image/jpeg")
+
+
+def _bytes_for_vision(data: bytes, *, suffix: str = ".jpg") -> tuple[bytes, str]:
+    if compress_images_enabled():
+        return compress_image_bytes(data)
+    return data, _mime_for_suffix(suffix)
+
+
 def image_parts_from_paths(paths: list[Path]) -> list[types.Part]:
     parts: list[types.Part] = []
     for path in paths:
-        mime = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".webp": "image/webp",
-            ".gif": "image/gif",
-        }.get(path.suffix.lower(), "image/jpeg")
-        # Validate readable image
-        with Image.open(path) as img:
+        raw = path.read_bytes()
+        with Image.open(io.BytesIO(raw)) as img:
             img.verify()
-        parts.append(
-            types.Part.from_bytes(data=path.read_bytes(), mime_type=mime)
-        )
+        payload, mime = _bytes_for_vision(raw, suffix=path.suffix)
+        parts.append(types.Part.from_bytes(data=payload, mime_type=mime))
     return parts
 
 
@@ -285,15 +389,20 @@ def image_parts_from_uploads(uploads: list[tuple[str, bytes]]) -> list[types.Par
     parts: list[types.Part] = []
     for name, data in uploads[:MAX_PHOTOS]:
         suffix = Path(name).suffix.lower() or ".jpg"
-        mime = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".webp": "image/webp",
-            ".gif": "image/gif",
-        }.get(suffix, "image/jpeg")
-        parts.append(types.Part.from_bytes(data=data, mime_type=mime))
+        payload, mime = _bytes_for_vision(data, suffix=suffix)
+        parts.append(types.Part.from_bytes(data=payload, mime_type=mime))
     return parts
+
+
+def vision_bytes_for_uploads(
+    uploads: list[tuple[str, bytes]],
+) -> list[tuple[str, bytes]]:
+    """Compressed copies for Composer / storage-efficient vision payloads."""
+    out: list[tuple[str, bytes]] = []
+    for name, data in uploads[:MAX_PHOTOS]:
+        payload, _mime = _bytes_for_vision(data)
+        out.append((Path(name).stem + ".jpg", payload))
+    return out
 
 
 def parse_json_response(text: str) -> Any:
@@ -304,7 +413,19 @@ def parse_json_response(text: str) -> Any:
     return json.loads(text)
 
 
+def is_gemini_quota_error(exc: Exception) -> bool:
+    """Daily/rate quota (429), not short-lived 503 overload."""
+    if isinstance(exc, errors.APIError) and exc.code == 429:
+        return True
+    msg = str(exc).lower()
+    return "resource_exhausted" in msg or (
+        "429" in msg and ("quota" in msg or "free_tier" in msg)
+    )
+
+
 def is_transient_api_error(exc: Exception) -> bool:
+    if is_gemini_quota_error(exc):
+        return False
     if isinstance(exc, errors.ServerError):
         return True
     if isinstance(exc, errors.APIError):
@@ -312,7 +433,7 @@ def is_transient_api_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     return any(
         token in msg
-        for token in ("503", "429", "overloaded", "unavailable", "resource_exhausted")
+        for token in ("503", "overloaded", "unavailable")
     )
 
 
@@ -329,9 +450,11 @@ def generate_content_with_retry(
     model: str,
     contents: list[Any],
     config: types.GenerateContentConfig,
+    max_retries: int | None = None,
 ) -> Any:
     last_error: Exception | None = None
-    for attempt in range(MAX_API_RETRIES):
+    attempts = max_retries if max_retries is not None else MAX_API_RETRIES
+    for attempt in range(attempts):
         try:
             return client.models.generate_content(
                 model=model,
@@ -339,11 +462,11 @@ def generate_content_with_retry(
                 config=config,
             )
         except Exception as exc:
-            if not is_transient_api_error(exc) or attempt == MAX_API_RETRIES - 1:
+            if not is_transient_api_error(exc) or attempt == attempts - 1:
                 raise
             last_error = exc
             time.sleep(API_RETRY_BASE_DELAY_SEC * (2**attempt))
-    raise RuntimeError(f"Gemini API failed after {MAX_API_RETRIES} retries") from last_error
+    raise RuntimeError(f"Gemini API failed after {attempts} retries") from last_error
 
 
 def generate_json(
@@ -353,6 +476,8 @@ def generate_json(
     user_parts: list[Any],
     schema: dict[str, Any],
     retry_hint: str | None = None,
+    models: list[str] | None = None,
+    content_max_retries: int | None = None,
 ) -> dict[str, Any]:
     contents: list[Any] = list(user_parts)
     if retry_hint:
@@ -367,20 +492,21 @@ def generate_json(
         temperature=0.2,
     )
     response = None
-    models = model_candidates()
+    model_list = models if models is not None else model_candidates()
     last_error: Exception | None = None
-    for idx, model in enumerate(models):
+    for idx, model in enumerate(model_list):
         try:
             response = generate_content_with_retry(
                 client,
                 model=model,
                 contents=contents,
                 config=config,
+                max_retries=content_max_retries,
             )
             break
         except Exception as exc:
             last_error = exc
-            can_try_next = idx < len(models) - 1 and (
+            can_try_next = idx < len(model_list) - 1 and (
                 is_transient_api_error(exc) or is_unavailable_model_error(exc)
             )
             if not can_try_next:
@@ -401,6 +527,8 @@ def generate_json_with_retry(
     system_prompt: str,
     user_parts: list[Any],
     schema: dict[str, Any],
+    models: list[str] | None = None,
+    content_max_retries: int | None = None,
 ) -> dict[str, Any]:
     last_error: Exception | None = None
     hint: str | None = None
@@ -412,6 +540,8 @@ def generate_json_with_retry(
                 user_parts=user_parts,
                 schema=schema,
                 retry_hint=hint,
+                models=models,
+                content_max_retries=content_max_retries,
             )
             validate_against_schema(data, schema)
             return data
@@ -419,6 +549,52 @@ def generate_json_with_retry(
             last_error = exc
             hint = str(exc)
     raise RuntimeError(f"JSON validation failed after retry: {last_error}") from last_error
+
+
+def generate_analysis_json(
+    *,
+    system_prompt: str,
+    text_parts: list[str],
+    schema: dict[str, Any],
+    image_uploads: list[tuple[str, bytes]] | None = None,
+    image_paths: list[Path] | None = None,
+    models: list[str] | None = None,
+    content_max_retries: int | None = None,
+) -> dict[str, Any]:
+    """Structured JSON via Gemini (default) or optional Composer API."""
+    backend = analysis_backend()
+    if backend == "composer":
+        from composer_llm import generate_json_composer_with_retry
+
+        vision_uploads = (
+            vision_bytes_for_uploads(image_uploads) if image_uploads else None
+        )
+        try:
+            return generate_json_composer_with_retry(
+                system_prompt=system_prompt,
+                text_parts=text_parts,
+                schema=schema,
+                image_uploads=vision_uploads or image_uploads,
+                image_paths=image_paths,
+            )
+        except RuntimeError:
+            if not composer_fallback_to_gemini():
+                raise
+
+    client = get_gemini_client()
+    user_parts: list[Any] = list(text_parts)
+    if image_paths:
+        user_parts.extend(image_parts_from_paths(image_paths))
+    elif image_uploads:
+        user_parts.extend(image_parts_from_uploads(image_uploads))
+    return generate_json_with_retry(
+        client,
+        system_prompt=system_prompt,
+        user_parts=user_parts,
+        schema=schema,
+        models=models,
+        content_max_retries=content_max_retries,
+    )
 
 
 def normalize_list_items(items: list[str] | None) -> list[str]:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import sys
 from pathlib import Path
 
@@ -13,7 +15,9 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import theme_css  # noqa: E402
-from analyze_property import analyze_from_memory  # noqa: E402
+import analyze_property as _analyze_property  # noqa: E402
+
+analyze_from_memory = _analyze_property.analyze_from_memory
 from ui_helpers import (  # noqa: E402
     clear_pasted_photos,
     collect_image_uploads,
@@ -25,7 +29,13 @@ from ui_helpers import (  # noqa: E402
     render_category_scores,
     render_clipboard_photo_picker,
 )
-from utils import MAX_PHOTOS, is_transient_api_error  # noqa: E402
+from composer_llm import probe_composer_api  # noqa: E402
+from utils import (  # noqa: E402
+    MAX_PHOTOS,
+    analysis_backend,
+    is_gemini_quota_error,
+    is_transient_api_error,
+)
 from write_to_sheets import list_regions, sheet_url  # noqa: E402
 
 theme_css.hero(
@@ -33,6 +43,26 @@ theme_css.hero(
     "Paste the listing, add screenshots and your own notes — get scores and a Sheet row.",
     icon="auto_awesome",
 )
+
+_backend = analysis_backend()
+if _backend == "composer":
+    _composer_ok, _composer_msg = probe_composer_api()
+    if _composer_ok:
+        st.success(_composer_msg, icon=":material/check_circle:")
+    else:
+        st.error(
+            "**Cursor / Composer analysis is configured but the local bridge is not running.**\n\n"
+            "Your Cursor subscription is used through a small app on your Mac (not through chat in the IDE).\n\n"
+            "1. [Cursor Dashboard → API keys](https://cursor.com/dashboard/api) → **User API keys** → create a key\n"
+            "2. Install **[API for Cursor](https://github.com/standardagents/composer-api)** (macOS), paste the key, **Start server** (port **8787**)\n"
+            "3. In `.env`: `ANALYSIS_BACKEND=composer`, `COMPOSER_API_BASE_URL=http://127.0.0.1:8787/v1`, "
+            "`COMPOSER_API_KEY=local`, `COMPOSER_MODEL=composer-2.5-fast`\n"
+            "4. Terminal check: `python3 scripts/check_composer.py` — then rerun Streamlit\n\n"
+            f"Details: `docs/composer-setup.md` — diagnostic: {_composer_msg}",
+            icon=":material/link_off:",
+        )
+else:
+    st.caption(f"Analysis backend: **Gemini** (`GEMINI_API_KEY`). For Cursor billing instead, see `docs/composer-setup.md`.")
 
 form_col, tips_col = st.columns([2, 1], gap="large")
 
@@ -101,7 +131,7 @@ with tips_col:
         st.markdown(
             "1. **Extract** — facts pulled from your text and screenshots\n"
             "2. **Transit** — Google Maps walk + train times to the city hub\n"
-            "3. **Score** — nine categories weighted by your strategy\n"
+            "3. **Score** — categories + neighbourhood research (fast mode, one step)\n"
             "4. **Save** — archived locally and upserted into your Sheet"
         )
     with theme_css.card("tips"):
@@ -114,6 +144,13 @@ with tips_col:
         )
 
 if submitted:
+    if _backend == "composer" and not probe_composer_api()[0]:
+        st.error(
+            "Start the local Composer API bridge on port 8787 before analyzing. "
+            "See the red banner above or `docs/composer-setup.md`.",
+            icon=":material/error:",
+        )
+        st.stop()
     if not listing_text.strip():
         st.error("Listing text is required.", icon=":material/error:")
         st.stop()
@@ -123,28 +160,47 @@ if submitted:
         st.error(f"Please use at most {MAX_PHOTOS} photos in total.", icon=":material/error:")
         st.stop()
 
-    with st.spinner("Extracting facts, looking up transit, and scoring…"):
+    importlib.reload(_analyze_property)
+    run_analyze = _analyze_property.analyze_from_memory
+    supports_progress = "progress" in inspect.signature(run_analyze).parameters
+
+    with st.status("Starting analysis…", expanded=True) as analysis_status:
         try:
-            result = analyze_from_memory(
-                listing_text,
-                link=listing_url.strip(),
-                user_comments=user_comments.strip(),
-                property_label=property_label.strip() or None,
-                image_uploads=uploads or None,
-                sheet_tab=sheet_tab_override,
-                skip_sheets=not save_to_google_sheets,
-            )
+            analyze_kwargs: dict = {
+                "link": listing_url.strip(),
+                "user_comments": user_comments.strip(),
+                "property_label": property_label.strip() or None,
+                "image_uploads": uploads or None,
+                "sheet_tab": sheet_tab_override,
+                "skip_sheets": not save_to_google_sheets,
+            }
+            if supports_progress:
+                analyze_kwargs["progress"] = lambda msg: analysis_status.update(
+                    label=msg
+                )
+            result = run_analyze(listing_text, **analyze_kwargs)
         except Exception as exc:  # noqa: BLE001
-            if is_transient_api_error(exc):
+            analysis_status.update(label="Analysis failed", state="error")
+            if is_gemini_quota_error(exc):
+                st.error(
+                    "Gemini API quota limit reached for this project/model (often the free tier’s "
+                    "daily cap). Enable billing on the same Google Cloud project as your API key, "
+                    "wait for the daily reset, or pin a single model in `.env` — e.g. "
+                    "`GEMINI_MODEL=gemini-3.6-flash` and avoid fallbacks to models you’ve maxed out "
+                    "(remove `gemini-3.8-flash` from `GEMINI_MODEL_FALLBACKS` if set).",
+                    icon=":material/speed:",
+                )
+            elif is_transient_api_error(exc):
                 st.error(
                     "Gemini is temporarily overloaded. The app retried automatically but still failed. "
                     "Wait a minute and try again, or set `GEMINI_MODEL` / `GEMINI_MODEL_FALLBACKS` in `.env` "
-                    "(e.g. `GEMINI_MODEL_FALLBACKS=gemini-3.6-flash`).",
+                    "(e.g. `GEMINI_MODEL=gemini-3.6-flash`).",
                     icon=":material/cloud_off:",
                 )
             else:
                 st.error(f"Analysis failed (nothing was written): {exc}", icon=":material/error:")
             st.stop()
+        analysis_status.update(label="Analysis complete", state="complete", expanded=False)
 
     clear_pasted_photos()
 
@@ -193,6 +249,8 @@ if submitted:
             ),
             ("Est. rent / mo", format_currency(extracted.get("estimated_rent")),
              "payments", "blue", "monthly"),
+            ("Annual tax", format_currency(extracted.get("taxes")),
+             "receipt_long", "amber", "from listing"),
             ("Est. insurance / yr", format_currency(extracted.get("estimated_insurance")),
              "shield", "blue", "AI estimate"),
         ]
