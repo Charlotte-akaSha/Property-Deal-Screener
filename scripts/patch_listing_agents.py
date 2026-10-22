@@ -28,6 +28,9 @@ LISTINGS: list[dict[str, str]] = [
         "zpid": "2079401811",
         "url": "https://www.zillow.com/homedetails/126-E-6th-Ave-126-Columbus-OH-43201/2079401811_zpid/",
         "region": "Columbus",
+        "name": "Nader Akrouche",
+        "company": "RE/MAX Connection Realtors",
+        "phone": "(614) 477-2443",
     },
     {
         "zpid": "2124115869",
@@ -35,7 +38,7 @@ LISTINGS: list[dict[str, str]] = [
         "region": "Columbus",
         "name": "Nader Akrouche",
         "company": "RE/MAX Connection Realtors",
-        "phone": "+1 (614) 477-2443",
+        "phone": "(614) 477-2443",
         "contingent": "1",
     },
 ]

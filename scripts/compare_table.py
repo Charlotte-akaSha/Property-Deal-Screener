@@ -542,7 +542,6 @@ def build_row_cells(
     sticky_prop = (
         f'<div class="pc-sticky-prop">{thumb_inner}'
         f'<div class="pc-sticky-prop-text">{name_html}'
-        f"<div class='pc-prop-sub pc-cell-hood-clip'>{hood_html}</div>"
         f"<div class='pc-status-toggles'>{''.join(status_bits)}</div>"
         f"</div></div>"
     )

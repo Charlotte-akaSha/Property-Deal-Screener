@@ -3,6 +3,7 @@ credentials/*
 !credentials/.gitkeep
 properties/
 .cache/
+data/neighbourhood_guides.json
 static/property_thumbs/
 .agents/
 .claude/

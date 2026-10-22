@@ -137,7 +137,11 @@ def show_judgment_dialog(row: Any, *, on_saved: Any = None) -> None:
 
 
 def show_neighbourhood_dialog(label: str) -> None:
-    """Popup with the rental and appreciation evaluation for a neighbourhood."""
+    """Popup with long-form neighbourhood investment context."""
+    from neighbourhood_guides import (
+        format_investment_guide_markdown,
+        neighbourhood_investment_guide,
+    )
     from neighbourhood_tiers import neighbourhood_evaluation
 
     @st.dialog(
@@ -146,12 +150,16 @@ def show_neighbourhood_dialog(label: str) -> None:
         on_dismiss=_clear_neighbourhood_dialog,
     )
     def _show() -> None:
-        found = neighbourhood_evaluation(label)
-        if found is None:
-            st.write("No evaluation for this neighbourhood yet.")
+        guide = neighbourhood_investment_guide(label)
+        if guide is not None:
+            st.markdown(format_investment_guide_markdown(guide))
         else:
-            _colour, text = found
-            st.markdown(text)
+            found = neighbourhood_evaluation(label)
+            if found is None:
+                st.write("No evaluation for this neighbourhood yet.")
+            else:
+                _colour, text = found
+                st.markdown(text)
         if st.button("Close", key="close_neighbourhood_eval"):
             _clear_neighbourhood_dialog()
             st.rerun()

@@ -628,6 +628,14 @@ def property_id_for_link_substring(ws, needle: str) -> str | None:
     return None
 
 
+def _sheet_agent_phone(phone: str) -> str:
+    """Avoid leading '+' — Google Sheets treats it as a formula."""
+    cleaned = phone.strip()
+    if cleaned.startswith("+") and cleaned[1:2].isdigit():
+        return cleaned[1:].strip()
+    return cleaned
+
+
 def save_listing_agent_fields(
     property_id: str,
     region: str,
@@ -656,7 +664,7 @@ def save_listing_agent_fields(
             },
             {
                 "range": f"{_col_letter(phone_col)}{sheet_row}",
-                "values": [[phone.strip()]],
+                "values": [[_sheet_agent_phone(phone)]],
             },
         ],
         value_input_option="USER_ENTERED",

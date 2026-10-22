@@ -184,6 +184,13 @@ def sheet_url() -> str:
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
 
 
+def _sheet_agent_phone(phone: str) -> str:
+    cleaned = phone.strip()
+    if cleaned.startswith("+") and len(cleaned) > 1 and cleaned[1].isdigit():
+        return cleaned[1:].strip()
+    return cleaned
+
+
 def _listing_agent_cell(extracted: dict[str, Any]) -> str:
     name = str(extracted.get("listing_agent_name") or "").strip()
     company = str(extracted.get("listing_agent_company") or "").strip()
@@ -213,7 +220,7 @@ def analysis_to_row(analysis: dict[str, Any]) -> list[Any]:
         "Property ID": analysis["meta"]["property_id"],
         "Link": e.get("link", ""),
         "Listing agent": _listing_agent_cell(e),
-        "Agent phone": str(e.get("listing_agent_phone") or "").strip(),
+        "Agent phone": _sheet_agent_phone(str(e.get("listing_agent_phone") or "")),
         "City": e.get("city", ""),
         "State": e.get("state", ""),
         "Overall": s.get("overall"),
@@ -383,6 +390,11 @@ def upsert_analysis(analysis: dict[str, Any], sheet_tab: str | None = None) -> d
     ws = open_worksheet(tab)
     ensure_headers(ws)
     row = analysis_to_row(analysis)
+    if len(row) != len(HEADERS):
+        raise ValueError(
+            f"Sheet row length {len(row)} does not match HEADERS ({len(HEADERS)}). "
+            "Refusing to write a misaligned row."
+        )
     property_id = str(row[0])
     existing = find_row_by_property_id(ws, property_id)
     if existing is None:
