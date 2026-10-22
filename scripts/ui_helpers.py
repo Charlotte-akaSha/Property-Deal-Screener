@@ -20,6 +20,145 @@ PASTED_HASHES_KEY = "pasted_photo_hashes"
 PASTE_GENERATION_KEY = "paste_button_generation"
 
 
+def _clear_neighbourhood_dialog() -> None:
+    st.query_params.pop("hood", None)
+
+
+def show_property_note_dialog(row: Any, *, on_saved: Any = None) -> None:
+    """Your /10 (Wow Factor) blends into match; optional text goes to Notes."""
+    from photos import readable_property_name
+    from scoring import PERSONAL_MATCH_WEIGHT, wow_factor_value
+    from sheets_data import personal_note_text, save_personal_rating
+
+    pid = str(row["Property ID"])
+    existing_note = personal_note_text(row.get("Notes"))
+    existing_score = wow_factor_value(row.get("Wow Factor"))
+
+    @st.dialog(f"Your rating — {readable_property_name(pid)}", width="medium")
+    def _show() -> None:
+        pct = int(round(PERSONAL_MATCH_WEIGHT * 100))
+        ai_pct = 100 - pct
+        st.caption(
+            f"Your **/10** score is saved as **Wow Factor** on the Sheet and blends into **Match** "
+            f"({ai_pct}% AI + {pct}% yours when set). Re-analyze does not erase it. "
+            "Flood **Pass** listings are not boosted by your score."
+        )
+        clear_score = st.checkbox("Clear my /10 score", value=False, key=f"clear_wow_{pid}")
+        default_score = float(existing_score) if existing_score is not None else 5.0
+        your_score = st.slider(
+            "Your overall score /10",
+            min_value=0.0,
+            max_value=10.0,
+            value=default_score,
+            step=0.5,
+            disabled=clear_score,
+            key=f"wow_slider_{pid}",
+        )
+        text = st.text_area(
+            "Optional note (why you feel that way)",
+            value=existing_note,
+            height=120,
+            key=f"personal_note_{pid}",
+        )
+        if st.button("Save", type="primary", key=f"save_personal_note_{pid}"):
+            wow_out = None if clear_score else float(your_score)
+            count, errors = save_personal_rating(row, wow_factor=wow_out, notes=text)
+            for msg in errors:
+                st.warning(msg)
+            if count:
+                if on_saved:
+                    on_saved()
+                st.query_params.pop("note", None)
+                st.rerun()
+            elif not errors:
+                st.warning("Nothing was saved.")
+        if st.button("Close", key=f"close_personal_note_{pid}"):
+            st.query_params.pop("note", None)
+            st.rerun()
+
+    _show()
+
+
+def show_judgment_dialog(row: Any, *, on_saved: Any = None) -> None:
+    """Final judgment Visit / Reject with optional reason (hover on table)."""
+    from photos import readable_property_name
+    from sheets_data import (
+        JUDGMENT_REJECT,
+        JUDGMENT_VISIT,
+        final_judgment_label,
+        judgment_reason_text,
+        save_personal_judgment,
+    )
+
+    pid = str(row["Property ID"])
+    current = final_judgment_label(row.get("Final Decision"))
+    existing_reason = judgment_reason_text(row.get("Judgment reason"))
+
+    @st.dialog(f"Final judgment — {readable_property_name(pid)}", width="medium")
+    def _show() -> None:
+        st.caption(
+            "Saved to **Final Decision** (Visit or Reject) and **Judgment reason** on the Sheet. "
+            "Hover the Judgment cell to see the reason."
+        )
+        choice = st.radio(
+            "Your call",
+            options=["", JUDGMENT_VISIT, JUDGMENT_REJECT],
+            format_func=lambda x: {"": "Not set", JUDGMENT_VISIT: "Visit", JUDGMENT_REJECT: "Reject"}[x],
+            index={"": 0, JUDGMENT_VISIT: 1, JUDGMENT_REJECT: 2}.get(current, 0),
+            horizontal=True,
+            key=f"judgment_choice_{pid}",
+        )
+        reason = st.text_area(
+            "Reason (optional)",
+            value=existing_reason,
+            height=100,
+            key=f"judgment_reason_{pid}",
+        )
+        if st.button("Save", type="primary", key=f"save_judgment_{pid}"):
+            count, errors = save_personal_judgment(
+                row,
+                decision=choice or None,
+                reason=reason,
+            )
+            for msg in errors:
+                st.warning(msg)
+            if count:
+                if on_saved:
+                    on_saved()
+                st.query_params.pop("judgment", None)
+                st.rerun()
+            elif not errors:
+                st.warning("Nothing was saved.")
+        if st.button("Close", key=f"close_judgment_{pid}"):
+            st.query_params.pop("judgment", None)
+            st.rerun()
+
+    _show()
+
+
+def show_neighbourhood_dialog(label: str) -> None:
+    """Popup with the rental and appreciation evaluation for a neighbourhood."""
+    from neighbourhood_tiers import neighbourhood_evaluation
+
+    @st.dialog(
+        f"Neighbourhood — {label}",
+        width="large",
+        on_dismiss=_clear_neighbourhood_dialog,
+    )
+    def _show() -> None:
+        found = neighbourhood_evaluation(label)
+        if found is None:
+            st.write("No evaluation for this neighbourhood yet.")
+        else:
+            _colour, text = found
+            st.markdown(text)
+        if st.button("Close", key="close_neighbourhood_eval"):
+            _clear_neighbourhood_dialog()
+            st.rerun()
+
+    _show()
+
+
 def normalize_listing_url(url: object) -> str:
     raw = str(url or "").strip()
     if raw.startswith("http://") or raw.startswith("https://"):

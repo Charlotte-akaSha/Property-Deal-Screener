@@ -39,11 +39,21 @@ TRANSIENT_API_STATUS_CODES = {429, 500, 502, 503, 504}
 def load_env() -> None:
     # override=True so edits to .env apply without restarting Streamlit.
     # Preserve explicit shell exports (e.g. ANALYSIS_BACKEND=gemini for one-off CLI runs).
-    preserved = {
-        k: os.environ[k]
-        for k in ("ANALYSIS_BACKEND",)
-        if os.environ.get(k)
-    }
+    preserve_keys = (
+        "ANALYSIS_BACKEND",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_MODEL",
+        "OPENROUTER_FAST_MODEL",
+        "GEMINI_MODEL",
+        "GEMINI_FAST_MODEL",
+        "ZILLOW_AUTO_CDP",
+        "ZILLOW_CDP_URL",
+        "ZILLOW_BROWSER_PROFILE",
+        "ZILLOW_PLAYWRIGHT_HEADED",
+        "ZILLOW_FETCH_DELAY_SEC",
+        "ZILLOW_CAPTCHA_WAIT_SEC",
+    )
+    preserved = {k: os.environ[k] for k in preserve_keys if os.environ.get(k)}
     load_dotenv(ROOT / ".env", override=True)
     for key, value in preserved.items():
         os.environ[key] = value
@@ -54,12 +64,12 @@ def get_model_name() -> str:
 
 
 def analysis_backend() -> str:
-    """LLM for extraction, market research, and scoring (`gemini` or `composer`)."""
+    """LLM for extraction, market research, and scoring."""
     load_env()
     backend = os.getenv("ANALYSIS_BACKEND", "gemini").strip().lower()
-    if backend not in ("gemini", "composer"):
+    if backend not in ("gemini", "composer", "openrouter"):
         raise RuntimeError(
-            f"ANALYSIS_BACKEND must be 'gemini' or 'composer', got {backend!r}."
+            f"ANALYSIS_BACKEND must be 'gemini', 'composer', or 'openrouter', got {backend!r}."
         )
     return backend
 
@@ -68,7 +78,8 @@ def composer_fallback_to_gemini() -> bool:
     load_env()
     raw = os.getenv("COMPOSER_FALLBACK_TO_GEMINI", "").strip().lower()
     if not raw:
-        return analysis_backend() != "composer"
+        backend = analysis_backend()
+        return backend not in ("composer", "openrouter")
     return raw in ("1", "true", "yes")
 
 
@@ -84,8 +95,14 @@ def fast_analysis_mode() -> bool:
 
 def analysis_fast_model() -> str | None:
     load_env()
-    if analysis_backend() == "gemini":
+    backend = analysis_backend()
+    if backend == "gemini":
         name = os.getenv("GEMINI_FAST_MODEL", "").strip() or get_model_name()
+        return name or None
+    if backend == "openrouter":
+        name = os.getenv("OPENROUTER_FAST_MODEL", "").strip() or os.getenv(
+            "OPENROUTER_MODEL", ""
+        ).strip()
         return name or None
     name = os.getenv("COMPOSER_FAST_MODEL", "").strip() or os.getenv(
         "COMPOSER_MODEL", ""
@@ -561,21 +578,28 @@ def generate_analysis_json(
     models: list[str] | None = None,
     content_max_retries: int | None = None,
 ) -> dict[str, Any]:
-    """Structured JSON via Gemini (default) or optional Composer API."""
+    """Structured JSON via Gemini (default), OpenRouter, or local Composer API."""
     backend = analysis_backend()
-    if backend == "composer":
+    vision_uploads = vision_bytes_for_uploads(image_uploads) if image_uploads else None
+    uploads = vision_uploads or image_uploads
+    if backend in ("composer", "openrouter"):
         from composer_llm import generate_json_composer_with_retry
 
-        vision_uploads = (
-            vision_bytes_for_uploads(image_uploads) if image_uploads else None
-        )
+        model_override = None
+        if models:
+            candidate = models[0]
+            if candidate and (backend == "composer" or "/" in candidate):
+                model_override = candidate
+        elif backend == "openrouter":
+            model_override = analysis_fast_model()
         try:
             return generate_json_composer_with_retry(
                 system_prompt=system_prompt,
                 text_parts=text_parts,
                 schema=schema,
-                image_uploads=vision_uploads or image_uploads,
+                image_uploads=uploads,
                 image_paths=image_paths,
+                model=model_override,
             )
         except RuntimeError:
             if not composer_fallback_to_gemini():

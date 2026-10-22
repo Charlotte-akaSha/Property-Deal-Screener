@@ -25,9 +25,9 @@ Help one investor screen buy-and-hold rental properties: fast structured analysi
 *Local working tree only — see Repository state banner above.*
 
 ```
-streamlit_app.py → app_pages/{analyze,compare}.py → scripts/* → Gemini / Maps / Sheets
+streamlit_app.py → app_pages/{analyze,compare,visits}.py → scripts/* → Gemini / Maps / Sheets
                                               ↓
-                              properties/<id>/ + .cache/geocode.json
+                              properties/<id>/ + .cache/geocode.json + .cache/visit_contacts.json
 ```
 
 At baseline `15b2c83`: `portal.py` → `analyze_from_memory` → same `scripts/*` pipeline (no Compare).

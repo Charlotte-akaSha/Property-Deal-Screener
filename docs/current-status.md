@@ -33,6 +33,10 @@ Last verified against repository: **2026-08-09**
 
 **Label: MIGRATION IN PROGRESS** — treat this as the actual runnable app locally.
 
+Visit organizer (**CURRENT** on branch `feature/visit-organizer`): page **Visits** (`app_pages/visits.py`, `scripts/visit_planner.py`, `scripts/visit_contacts.py`). Select listings, group into days by neighbourhood and proximity (target 5–8), suggest times in a sidebar window. Phones in `.cache/visit_contacts.json`. WhatsApp via `wa.me` (user still sends). Travel times are straight-line estimates.
+
+Flood gate (**CURRENT**): a pin in a FEMA high-risk zone (A, AE, AH, AO, AR, A99, V, VE) is **Pass**. Franklinton climate resilience is set to 1/10 and the match score is capped at 4.0. Neighbourhood colour is rental and appreciation, except Franklinton stays orange. Clicking a neighbourhood badge opens a written evaluation against those criteria. When FEMA returns a zone for the pin, that zone wins over a neighbourhood flood label. Google Sheet cells are not rewritten until the next analysis.
+
 ### Modified (vs HEAD)
 
 | File | Change |

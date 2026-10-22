@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import re
 import ssl
 import sys
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -15,7 +19,7 @@ SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 
 from analyze_property import analyze_from_memory
-from utils import analysis_backend
+from utils import ROOT, analysis_backend, load_env
 
 LISTINGS: list[dict[str, Any]] = [
     {
@@ -131,6 +135,124 @@ Facts:
 ]
 
 
+def _name_from_zillow_url(url: str) -> str:
+    m = re.search(r"/homedetails/([^/]+)/", url)
+    if not m:
+        return url[:48]
+    slug = m.group(1).replace("-", " ")
+    return slug[:80]
+
+
+def _load_queue_from_json(path: Path) -> list[dict[str, Any]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise ValueError(f"{path}: expected a JSON array of listings")
+    return data
+
+
+def _load_queue_from_urls(path: Path) -> list[dict[str, Any]]:
+    lines = [
+        ln.strip()
+        for ln in path.read_text(encoding="utf-8").splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+    return [
+        {
+            "name": _name_from_zillow_url(url),
+            "link": url,
+            "photo_urls": [],
+            "text": "",
+            "_fetch_from_url": True,
+        }
+        for url in lines
+    ]
+
+
+def _fetch_delay_sec() -> float:
+    load_env()
+    raw = os.environ.get("ZILLOW_FETCH_DELAY_SEC", "4")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 4.0
+
+
+def run_queue(queue: list[dict[str, Any]], *, fetch_missing: bool = False) -> int:
+    from listing_from_url import import_from_url
+
+    failures = 0
+    delay = _fetch_delay_sec() if fetch_missing else 0.0
+    for idx, item in enumerate(queue):
+        if fetch_missing and idx > 0 and delay:
+            time.sleep(delay)
+        name = str(item.get("name") or _name_from_zillow_url(str(item.get("link", ""))))
+        print(f"\n=== {name} ===", flush=True)
+        text = str(item.get("text") or "").strip()
+        link = str(item.get("link") or "").strip()
+        if (not text or item.get("_fetch_from_url")) and fetch_missing and link:
+            try:
+                imported = import_from_url(link)
+                text = imported["text"]
+                if not item.get("photo_urls"):
+                    item["photo_urls"] = imported.get("photo_urls") or []
+                uploads_extra = imported.get("photos") or []
+            except Exception as exc:  # noqa: BLE001
+                print(f"  IMPORT FAILED: {exc}", flush=True)
+                failures += 1
+                continue
+        else:
+            uploads_extra = None
+
+        local_photo_paths = item.get("_local_photos") or []
+        if local_photo_paths and not uploads_extra:
+            uploads_extra = []
+            for rel in local_photo_paths[:5]:
+                path = Path(str(rel))
+                if not path.is_absolute():
+                    path = ROOT / path
+                if path.is_file():
+                    uploads_extra.append((path.name, path.read_bytes()))
+
+        if not text:
+            print(
+                "  SKIP: no listing text (use batch JSON with pasted description, or --fetch-urls)",
+                flush=True,
+            )
+            failures += 1
+            continue
+
+        photo_urls = list(item.get("photo_urls") or [])
+        uploads = _download_photos(photo_urls)
+        if uploads_extra:
+            uploads = uploads_extra
+        print(f"  photos: {len(uploads)}", flush=True)
+
+        def progress(msg: str) -> None:
+            print(f"  … {msg}", flush=True)
+
+        try:
+            result = analyze_from_memory(
+                text,
+                link=link,
+                image_uploads=uploads or None,
+                progress=progress,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  FAILED: {exc}", flush=True)
+            failures += 1
+            continue
+        scored = result["analysis"]["scored"]
+        print(f"  Property ID: {result['analysis']['meta']['property_id']}")
+        print(f"  Overall: {scored['overall']} — {scored['recommendation']}")
+        if result.get("sheets_error"):
+            print(f"  SHEETS ERROR: {result['sheets_error']}")
+            failures += 1
+        elif result.get("sheets"):
+            s = result["sheets"]
+            print(f"  Sheets {s['action']} on {s.get('sheet_tab')}")
+    return failures
+
+
 def _download_photos(urls: list[str]) -> list[tuple[str, bytes]]:
     ctx = ssl.create_default_context(cafile=certifi.where())
     uploads: list[tuple[str, bytes]] = []
@@ -152,45 +274,53 @@ def main() -> int:
         "--only",
         help="Run a single queue entry by name substring (e.g. Whitethorne)",
     )
+    parser.add_argument(
+        "--from-json",
+        type=Path,
+        metavar="PATH",
+        help="Batch file like data/batch13.json (link + pasted text + optional photo_urls)",
+    )
+    parser.add_argument(
+        "--from-urls",
+        type=Path,
+        metavar="PATH",
+        help="One Zillow URL per line; requires --fetch-urls (often blocked by Zillow)",
+    )
+    parser.add_argument(
+        "--fetch-urls",
+        action="store_true",
+        help="Fetch listing text from Zillow for --from-urls or JSON rows missing text",
+    )
     args = parser.parse_args()
     backend = analysis_backend()
     print(f"Analysis backend: {backend}", flush=True)
-    queue = LISTINGS
+
+    if args.from_json and args.from_urls:
+        print("Use only one of --from-json or --from-urls", flush=True)
+        return 1
+
+    if args.from_json:
+        queue = _load_queue_from_json(args.from_json)
+    elif args.from_urls:
+        queue = _load_queue_from_urls(args.from_urls)
+        if not args.fetch_urls:
+            print(
+                "URL-only batch needs --fetch-urls (Zillow may block; see data/batch13.json pattern).",
+                flush=True,
+            )
+            return 1
+        os.environ.setdefault("ZILLOW_AUTO_CDP", "true")
+    else:
+        queue = LISTINGS
+
     if args.only:
         key = args.only.lower()
-        queue = [x for x in LISTINGS if key in x["name"].lower()]
+        queue = [x for x in queue if key in str(x.get("name", "")).lower()]
         if not queue:
             print(f"No listing matches --only={args.only!r}", flush=True)
             return 1
-    failures = 0
-    for item in queue:
-        print(f"\n=== {item['name']} ===", flush=True)
-        uploads = _download_photos(item["photo_urls"])
-        print(f"  photos: {len(uploads)}", flush=True)
 
-        def progress(msg: str) -> None:
-            print(f"  … {msg}", flush=True)
-
-        try:
-            result = analyze_from_memory(
-                item["text"],
-                link=item["link"],
-                image_uploads=uploads or None,
-                progress=progress,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"  FAILED: {exc}", flush=True)
-            failures += 1
-            continue
-        scored = result["analysis"]["scored"]
-        print(f"  Property ID: {result['analysis']['meta']['property_id']}")
-        print(f"  Overall: {scored['overall']} — {scored['recommendation']}")
-        if result.get("sheets_error"):
-            print(f"  SHEETS ERROR: {result['sheets_error']}")
-            failures += 1
-        elif result.get("sheets"):
-            s = result["sheets"]
-            print(f"  Sheets {s['action']} on {s.get('sheet_tab')}")
+    failures = run_queue(queue, fetch_missing=args.fetch_urls)
     return 1 if failures else 0
 
 

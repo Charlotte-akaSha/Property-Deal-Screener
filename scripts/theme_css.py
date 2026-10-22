@@ -18,15 +18,26 @@ ACCENTS = {
     "amber": ("#F6F0E4", "#C9A227"),
 }
 
-# Must match len(COMPARE_TABLE_HEADERS) in app_pages/compare.py (17 columns).
+# Must match len(COMPARE_TABLE_HEADERS) in scripts/compare_table.py (21 columns).
 COMPARE_GRID_TEMPLATE = (
-    "minmax(220px, 260px) minmax(152px, 1.15fr) 92px 76px 76px 72px 48px "
-    "minmax(124px, 1fr) 70px 92px 108px minmax(120px, 1fr) 108px 78px 78px 58px 118px"
+    "minmax(220px, 260px) minmax(152px, 1.15fr) 92px 56px 76px 76px 72px 48px "
+    "minmax(124px, 1fr) 72px 70px 92px 108px minmax(120px, 1fr) 108px 78px 78px 58px "
+    "minmax(100px, 1.05fr) 72px 118px"
 )
+# Visit organizer table: Visit + Property + Contact + compare cols without Neighbourhood (22).
+VISIT_COMPARE_GRID_TEMPLATE = (
+    "44px minmax(220px, 260px) minmax(108px, 1fr) 92px 56px 76px 76px 72px 48px "
+    "minmax(124px, 1fr) 72px 70px 92px 108px minmax(120px, 1fr) 108px 78px 78px 58px "
+    "minmax(100px, 1.05fr) 72px 118px"
+)
+# Sum of column minimums + gaps + horizontal padding — keep in sync with templates.
+COMPARE_GRID_MIN_WIDTH_PX = 2328
+VISIT_COMPARE_GRID_MIN_WIDTH_PX = 2468
 
 
 def compare_grid_style_attr() -> str:
-    return f' style="grid-template-columns:{COMPARE_GRID_TEMPLATE}"'
+    """Deprecated: grid columns come from injected CSS only (avoids inline/class drift)."""
+    return ""
 
 
 _CSS = """
@@ -53,7 +64,20 @@ html, body, [data-testid="stAppViewContainer"], .stMarkdown, .stCaption, label {
   background: linear-gradient(180deg, #F6F7FC 0%, #F0F2F8 100%);
 }
 [data-testid="stHeader"] {
-  background: transparent;
+  background: #FFFFFF !important;
+  border-bottom: 1px solid var(--pc-line);
+  box-shadow: 0 1px 3px rgba(31, 36, 51, 0.06);
+  z-index: 999;
+}
+.stApp > header {
+  background: #FFFFFF !important;
+  backdrop-filter: none !important;
+}
+[data-testid="stToolbar"] {
+  background: #FFFFFF !important;
+}
+[data-testid="stDecoration"] {
+  background: #FFFFFF !important;
 }
 /* Top nav lives in the absolute header bar — main content must clear it. */
 [data-testid="stMainBlockContainer"].block-container,
@@ -444,6 +468,7 @@ span[data-testid="stBadge"] {
 }
 .pc-thumb-empty { flex-shrink: 0; }
 .pc-sticky-prop {
+  grid-column: 1;
   position: sticky;
   left: 0;
   z-index: 2;
@@ -510,6 +535,11 @@ a.pc-prop-link:hover {
   font-size: 0.72rem; font-weight: 600; line-height: 1.35;
   max-width: 100%;
 }
+a.pc-hood-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+a.pc-hood-link:hover .pc-hood-badge { filter: brightness(0.96); }
 .pc-cell-hood-clip {
   overflow: hidden;
   max-width: 100%;
@@ -547,6 +577,21 @@ a.pc-prop-link:hover {
 .pc-match {
   display: flex; flex-direction: column; gap: 4px;
 }
+a.pc-match-link {
+  color: inherit;
+  text-decoration: none;
+  display: block;
+  border-radius: 8px;
+}
+a.pc-match-link:hover .pc-match-val { color: var(--pc-accent); }
+a.pc-match-link:hover .pc-match-bar { background: #E0DCF8; }
+a.pc-verdict-link {
+  color: inherit;
+  text-decoration: none;
+  display: block;
+}
+a.pc-verdict-link:hover .pc-verdict { filter: brightness(0.95); }
+a.pc-verdict-link:hover .pc-prop-sub { color: var(--pc-accent); }
 .pc-match-val { font-size: 0.85rem; font-weight: 600; color: var(--pc-text); }
 .pc-match-bar {
   height: 6px; border-radius: 999px; background: #EBEAF8; overflow: hidden;
@@ -573,7 +618,7 @@ a.pc-prop-link:hover {
   grid-template-columns: /*COMPARE_GRID_TEMPLATE*/;
   gap: 8px;
   align-items: center;
-  min-width: 1872px;
+  min-width: /*COMPARE_GRID_MIN_WIDTH*/px;
   padding: 8px 10px;
 }
 .pc-compare-head > *,
@@ -604,20 +649,100 @@ a.pc-sort-link.pc-sort-active { color: var(--pc-text); }
 .pc-compare-row { border-bottom: 1px solid var(--pc-line); }
 .pc-compare-row:hover { background: #FAFBFE; }
 .pc-compare-row:hover .pc-sticky-prop { background: #FAFBFE; }
-.pc-sticky-verdict {
-  position: sticky;
-  right: 0;
-  z-index: 2;
+.pc-verdict-col {
+  grid-column: -1;
+  justify-self: end;
+  text-align: right;
   min-width: 0;
-  background: #fff;
-  padding-left: 10px;
-  margin-left: 2px;
-  box-shadow: -6px 0 10px -8px rgba(30, 35, 55, 0.35);
+  padding-left: 4px;
 }
-.pc-compare-row:hover .pc-sticky-verdict { background: #FAFBFE; }
-a.pc-sort-link.pc-sticky-verdict-head {
+.pc-compare-row:hover .pc-verdict-col { background: transparent; }
+.pc-visit-grid .pc-compare-head,
+.pc-visit-grid .pc-compare-row {
+  grid-template-columns: /*VISIT_COMPARE_GRID_TEMPLATE*/;
+  min-width: /*VISIT_COMPARE_GRID_MIN_WIDTH*/px;
+}
+.pc-visit-grid .pc-sticky-prop { grid-column: auto; }
+a.pc-visit-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+a.pc-contacted-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--pc-muted);
+  text-decoration: none;
+}
+a.pc-contacted-toggle.pc-visit-on { color: #2F7A6E; }
+.pc-status-toggles { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+a.pc-contingent-toggle.pc-visit-on { color: #9A6B12; }
+a.pc-contingent-toggle.pc-visit-on .pc-visit-box {
+  border-color: #C9A227;
+  background: #C9A227;
+}
+a.pc-contacted-toggle .pc-visit-box {
+  width: 16px;
+  height: 16px;
+  font-size: 0.7rem;
+}
+.pc-visit-box {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 2px solid #C5CAD9;
+  display: grid;
+  place-items: center;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #FFFFFF;
+  background: #FFFFFF;
+}
+.pc-visit-on .pc-visit-box {
+  border-color: var(--pc-accent);
+  background: var(--pc-accent);
+}
+a.pc-contact-link {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--pc-text);
+  text-decoration: none;
+}
+a.pc-contact-link:hover { color: var(--pc-accent); }
+a.pc-contact-empty { color: var(--pc-muted); font-weight: 500; }
+a.pc-note-link {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--pc-text);
+  text-decoration: none;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+a.pc-note-link:hover { color: var(--pc-accent); }
+a.pc-note-empty { color: var(--pc-muted); font-style: italic; }
+a.pc-judgment-link {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+a.pc-judgment-link:hover { text-decoration: underline; }
+a.pc-judgment-visit { color: #2d7a6f; }
+a.pc-judgment-reject { color: #9a4a52; }
+a.pc-judgment-empty { color: var(--pc-muted); font-weight: 500; }
+.pc-sort-link.pc-sort-static { cursor: default; }
+a.pc-sort-link.pc-verdict-head {
+  grid-column: -1;
   display: block;
   text-align: right;
+  justify-self: end;
   box-shadow: none;
   padding-left: 0;
 }
@@ -690,6 +815,9 @@ _FAVICON_SCRIPT = """
 """
 
 _CSS = _CSS.replace("/*COMPARE_GRID_TEMPLATE*/", COMPARE_GRID_TEMPLATE)
+_CSS = _CSS.replace("/*COMPARE_GRID_MIN_WIDTH*/", str(COMPARE_GRID_MIN_WIDTH_PX))
+_CSS = _CSS.replace("/*VISIT_COMPARE_GRID_TEMPLATE*/", VISIT_COMPARE_GRID_TEMPLATE)
+_CSS = _CSS.replace("/*VISIT_COMPARE_GRID_MIN_WIDTH*/", str(VISIT_COMPARE_GRID_MIN_WIDTH_PX))
 
 
 def _st_html(markup: str, *, allow_javascript: bool = False) -> None:
@@ -704,7 +832,8 @@ def _st_html(markup: str, *, allow_javascript: bool = False) -> None:
 
 
 def inject() -> None:
-    _st_html(_CSS)
+    # Bump when compare grid CSS changes so Streamlit/browser pick up layout fixes.
+    _st_html(f"<!-- pc-theme v={COMPARE_GRID_MIN_WIDTH_PX} -->\n{_CSS}")
     _st_html(_FAVICON_SCRIPT, allow_javascript=True)
 
 

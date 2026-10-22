@@ -20,6 +20,8 @@ FEMA_NFHL_QUERY = (
 _CACHE_PATH = ROOT / ".cache" / "fema_flood.json"
 
 _HIGH_ZONES = frozenset({"A", "AE", "AH", "AO", "AR", "A99", "V", "VE"})
+# Bump when the flood-zone Pass rule changes so Streamlit reloads Sheet rows.
+FLOOD_GATE_VERSION = 2
 
 _HIGH_RISK_PATTERNS: tuple[str, ...] = (
     "franklinton",
@@ -80,6 +82,54 @@ def _label_rank(label: str) -> int:
 
 def worse_label(a: str, b: str) -> str:
     return a if _label_rank(a) >= _label_rank(b) else b
+
+
+def is_special_flood_hazard(assessment: FloodAssessment | None) -> bool:
+    """True when the pin is in a FEMA high-risk zone (or the listing says so).
+
+    Neighbourhood-only labels (Scioto corridor, nearby boxes) are not a flood zone.
+    """
+    if assessment is None or assessment.label != "High":
+        return False
+    if assessment.zone.strip().upper() in _HIGH_ZONES:
+        return True
+    note = assessment.note.lower()
+    return "sfha" in note or "flood zone" in note
+
+
+def apply_flood_zone_pass(scored: dict, assessment: FloodAssessment) -> None:
+    """Cap climate and risk, recompute the match score, and force Reject / Pass."""
+    cap = float(assessment.score_10)
+    categories = scored.setdefault("categories", {})
+    for key in ("climate", "risk"):
+        try:
+            current = float(categories.get(key, cap))
+        except (TypeError, ValueError):
+            current = cap
+        categories[key] = round(min(current, cap), 2)
+    try:
+        from scoring import compute_overall
+
+        scored["overall"] = compute_overall(categories)
+        scored["overall_computed_from_weights"] = True
+    except (ValueError, TypeError):
+        pass
+    scored["recommendation"] = "Reject"
+    scored["flood_zone_pass"] = True
+    zone = assessment.zone.strip().upper() or "SFHA"
+    note = (
+        f"Mapped flood zone ({zone}): automatic Pass. "
+        f"Climate and risk capped at {cap:.1f} and the match score was recomputed."
+    )
+    flags = scored.setdefault("red_flags", [])
+    if isinstance(flags, list) and note not in flags:
+        flags.append(note)
+    prefix = (
+        "Pass — this listing sits in a FEMA special flood hazard zone, so it is not a visit candidate."
+    )
+    rationale = str(scored.get("rationale") or "").strip()
+    if prefix not in rationale:
+        scored["rationale"] = f"{prefix} {rationale}".strip()
 
 
 def _worst(*items: FloodAssessment | None) -> FloodAssessment | None:
@@ -241,19 +291,23 @@ def assess_flood_risk(
     if city_s and city_s not in ("columbus", "ohio", ""):
         return _from_notes(flood_zone_notes)
 
-    fema_hit: FloodAssessment | None = None
+    notes = _from_notes(flood_zone_notes)
+    parcel: FloodAssessment | None = None
     if lat is not None and lon is not None:
         attrs = query_fema_nfhl(lat, lon)
         if attrs:
-            fema_hit = _from_fema(attrs)
-        box_hit = _from_lat_lon_boxes(lat, lon)
-        fema_hit = _worst(fema_hit, box_hit)
+            parcel = _from_fema(attrs)
+    # A mapped FEMA zone is the parcel. Neighbourhood patterns do not override it.
+    if parcel is not None and parcel.zone.strip():
+        return _worst(parcel, notes)
 
     hay = _norm(neighbourhood_label)
+    box = _from_lat_lon_boxes(lat, lon) if lat is not None and lon is not None else None
     return _worst(
-        fema_hit,
+        parcel,
+        box,
         _from_patterns(hay) if hay else None,
-        _from_notes(flood_zone_notes),
+        notes,
     )
 
 
@@ -333,6 +387,8 @@ def apply_flood_grounding(
             note = f"Flood exposure: {grounded.note}"
             if note not in flags:
                 flags.append(note)
+        if is_special_flood_hazard(grounded):
+            apply_flood_zone_pass(scored, grounded)
 
 
 def resolve_flood_assessment(
@@ -362,6 +418,8 @@ def resolve_flood_assessment(
         lon=lon,
     )
     stored = str(sheet_flood_label or "").strip()
+    if grounded and grounded.zone.strip():
+        return grounded
     if stored and grounded:
         final_label = worse_label(stored, grounded.label)
         if final_label != grounded.label:

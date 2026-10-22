@@ -81,9 +81,13 @@ HEADERS = [
     "Neighbourhood Research",
     "Appreciation Research",
     "Rental Research",
+    "Days on Zillow",
+    "Judgment reason",
 ]
 
-PERSONAL_COLUMN_LIST = ["Wow Factor", "Notes", "Visit Date", "Final Decision"]
+PERSONAL_COLUMN_LIST = ["Wow Factor", "Notes", "Visit Date", "Final Decision", "Judgment reason"]
+# Written as one block on the Sheet (Judgment reason is appended at the end of HEADERS).
+PERSONAL_SHEET_BLOCK = ["Wow Factor", "Notes", "Visit Date", "Final Decision"]
 PERSONAL_HEADERS = set(PERSONAL_COLUMN_LIST)
 COMPARE_COLUMN_LIST = [
     "Legal Units",
@@ -201,6 +205,7 @@ def analysis_to_row(analysis: dict[str, Any]) -> list[Any]:
         "City": e.get("city", ""),
         "State": e.get("state", ""),
         "Overall": s.get("overall"),
+        "Days on Zillow": e.get("days_on_zillow"),
         "Price": e.get("price"),
         "Price/sqft": e.get("price_per_sqft"),
         "Taxes": e.get("taxes"),
@@ -241,6 +246,7 @@ def analysis_to_row(analysis: dict[str, Any]) -> list[Any]:
         "Notes": "",
         "Visit Date": "",
         "Final Decision": "",
+        "Judgment reason": "",
         **_compare_fields(e, s, t),
     }
     return [by_header[h] for h in HEADERS]

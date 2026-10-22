@@ -134,11 +134,14 @@ def _with_search(client: Any, user_parts: list[str], schema: dict[str, Any]) -> 
 
 
 def _json_research(prompt: str, parts: list[str], schema: dict[str, Any]) -> dict[str, Any]:
+    model_list: list[str] | None = None
+    if analysis_backend() == "gemini":
+        model_list = [_gemini_research_model()]
     return generate_analysis_json(
         system_prompt=prompt,
         text_parts=parts,
         schema=schema,
-        models=[_gemini_research_model()],
+        models=model_list,
         content_max_retries=_JSON_MAX_RETRIES,
     )
 

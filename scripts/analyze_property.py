@@ -184,6 +184,21 @@ def score_property(
     return result
 
 
+def _apply_flood_zone_gate(extracted: dict, scored: dict, property_id: str) -> None:
+    """Mapped FEMA flood zones become Reject, with climate and risk capped."""
+    extracted["property_id"] = property_id
+    try:
+        from flood_lookup import apply_flood_grounding
+
+        apply_flood_grounding(
+            extracted,
+            scored,
+            neighbourhood_name=str(scored.get("neighbourhood_name") or ""),
+        )
+    except Exception:  # noqa: BLE001 — a flood lookup miss must not fail the analysis
+        return
+
+
 def _report_progress(progress: Callable[[str], None] | None, message: str) -> None:
     if progress:
         progress(message)
@@ -290,6 +305,7 @@ def analyze_from_memory(
             sheet_tab=sheet_tab,
             market_research=research,
         )
+    _apply_flood_zone_gate(extracted, scored, property_id)
     _report_progress(progress, "Saving results…")
     analysis = persist_local(
         folder,
@@ -382,6 +398,7 @@ def analyze_from_folder(
             sheet_tab=sheet_tab,
             market_research=research,
         )
+    _apply_flood_zone_gate(extracted, scored, property_id)
     _report_progress(progress, "Saving results…")
     analysis = persist_local(
         folder,

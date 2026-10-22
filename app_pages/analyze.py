@@ -45,10 +45,18 @@ theme_css.hero(
 )
 
 _backend = analysis_backend()
-if _backend == "composer":
-    _composer_ok, _composer_msg = probe_composer_api()
-    if _composer_ok:
-        st.success(_composer_msg, icon=":material/check_circle:")
+if _backend in ("composer", "openrouter"):
+    _api_ok, _api_msg = probe_composer_api()
+    if _api_ok:
+        st.success(_api_msg, icon=":material/check_circle:")
+    elif _backend == "openrouter":
+        st.error(
+            "**OpenRouter is configured but the API check failed.**\n\n"
+            "Set `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` in `.env` (vision-capable model). "
+            "See `docs/openrouter-setup.md`.\n\n"
+            f"Diagnostic: {_api_msg}",
+            icon=":material/cloud_off:",
+        )
     else:
         st.error(
             "**Cursor / Composer analysis is configured but the local bridge is not running.**\n\n"
@@ -58,11 +66,14 @@ if _backend == "composer":
             "3. In `.env`: `ANALYSIS_BACKEND=composer`, `COMPOSER_API_BASE_URL=http://127.0.0.1:8787/v1`, "
             "`COMPOSER_API_KEY=local`, `COMPOSER_MODEL=composer-2.5-fast`\n"
             "4. Terminal check: `python3 scripts/check_composer.py` — then rerun Streamlit\n\n"
-            f"Details: `docs/composer-setup.md` — diagnostic: {_composer_msg}",
+            f"Details: `docs/composer-setup.md` — diagnostic: {_api_msg}",
             icon=":material/link_off:",
         )
-else:
-    st.caption(f"Analysis backend: **Gemini** (`GEMINI_API_KEY`). For Cursor billing instead, see `docs/composer-setup.md`.")
+elif _backend == "gemini":
+    st.caption(
+        "Analysis backend: **Gemini** (`GEMINI_API_KEY`). "
+        "Alternatives: `docs/openrouter-setup.md`, `docs/composer-setup.md`."
+    )
 
 form_col, tips_col = st.columns([2, 1], gap="large")
 
@@ -144,10 +155,14 @@ with tips_col:
         )
 
 if submitted:
-    if _backend == "composer" and not probe_composer_api()[0]:
+    if _backend in ("composer", "openrouter") and not probe_composer_api()[0]:
+        doc = (
+            "docs/openrouter-setup.md"
+            if _backend == "openrouter"
+            else "docs/composer-setup.md"
+        )
         st.error(
-            "Start the local Composer API bridge on port 8787 before analyzing. "
-            "See the red banner above or `docs/composer-setup.md`.",
+            f"Fix the analysis API configuration before analyzing. See `{doc}` and the banner above.",
             icon=":material/error:",
         )
         st.stop()

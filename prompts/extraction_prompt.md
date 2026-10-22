@@ -11,6 +11,7 @@ You extract **objective facts only** from a real estate listing, any attached sc
 - When **user comments** are provided, incorporate factual observations into relevant fields (e.g. `condition_notes`, `flood_zone_notes`) without adding your own opinions.
 - If a listing URL is provided in the user message, put it in `link`.
 - Set `status` to `"New"` unless the listing clearly states another status.
+- **`days_on_zillow`** — whole number of days the listing has been on Zillow (or “days on market” on the page). Use null if not stated.
 
 ## Estimated rent & insurance (ballpark when missing)
 

@@ -25,6 +25,7 @@ page = st.navigation(
     [
         st.Page("app_pages/analyze.py", title="Analyze", icon=":material/auto_awesome:"),
         st.Page("app_pages/compare.py", title="Compare", icon=":material/dashboard:"),
+        st.Page("app_pages/visits.py", title="Visits", icon=":material/route:"),
     ],
     position="top",
 )

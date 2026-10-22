@@ -62,3 +62,28 @@ def compute_overall(categories: dict[str, Any], weights: dict[str, float] | None
             raise ValueError(f"Category {key} score out of range 0–10: {score}")
         overall += score * w[key]
     return round(overall, 2)
+
+
+# Your /10 (Wow Factor) blends into displayed match when set: (1-w)*AI + w*you
+PERSONAL_MATCH_WEIGHT = 0.20
+
+
+def wow_factor_value(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, float) and value != value:  # NaN
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if score < 0 or score > 10:
+        return None
+    return round(score, 2)
+
+
+def blend_with_personal_score(ai_overall: float, personal: float) -> float:
+    w = PERSONAL_MATCH_WEIGHT
+    return round((1.0 - w) * ai_overall + w * personal, 2)

@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 import pandas as pd
 
-from flood_lookup import flood_display_for_property
+from flood_lookup import (
+    flood_display_text,
+    is_special_flood_hazard,
+    resolve_flood_assessment,
+)
+from scoring import blend_with_personal_score, compute_overall, parse_weights, wow_factor_value
 from neighbourhood import neighbourhood_display_label
 from neighbourhood_tiers import (
     area_appreciation_note,
@@ -18,8 +24,12 @@ from neighbourhood_tiers import (
 from write_to_sheets import (
     HEADERS,
     PERSONAL_COLUMN_LIST,
+    PERSONAL_SHEET_BLOCK,
     open_worksheet,
 )
+
+JUDGMENT_VISIT = "Visit"
+JUDGMENT_REJECT = "Reject"
 
 SCORE_COLUMNS = [
     "Financial",
@@ -36,6 +46,7 @@ SCORE_COLUMNS = [
 NUMERIC_COLUMNS = [
     "Overall",
     "Price",
+    "Days on Zillow",
     "Price/sqft",
     "Taxes",
     "HOA",
@@ -50,9 +61,6 @@ NUMERIC_COLUMNS = [
     *SCORE_COLUMNS,
     "Wow Factor",
 ]
-
-PERSONAL_COLUMN_LIST = ["Wow Factor", "Notes", "Visit Date", "Final Decision"]
-
 
 def property_id_row_map(ws) -> dict[str, list[int]]:
     """Map Property ID -> 1-based sheet row numbers (column A, data rows only)."""
@@ -124,8 +132,21 @@ def to_number(series: pd.Series) -> pd.Series:
 
 
 def load_region(region: str) -> pd.DataFrame:
-    ws = open_worksheet(region)
-    records = ws.get_all_records()
+    last_exc: Exception | None = None
+    records: list[dict[str, Any]] | None = None
+    ws = None
+    for attempt in range(3):
+        try:
+            ws = open_worksheet(region)
+            records = ws.get_all_records()
+            break
+        except Exception as exc:  # noqa: BLE001 — retry transient Google API drops
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    if records is None or ws is None:
+        assert last_exc is not None
+        raise last_exc
     if not records:
         return pd.DataFrame(columns=[*HEADERS, "Region", "_sheet_row"])
     df = pd.DataFrame(records)
@@ -189,15 +210,6 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["Gross rent label"] = [
         _gross_rent_label(monthly, annual=gross)
         for monthly, gross in zip(rent, gross_annual, strict=False)
-    ]
-    overall = out["Overall"] if "Overall" in out.columns else pd.Series(pd.NA, index=out.index)
-    out["Match /100"] = overall * 10
-    recommendations = (
-        out["Recommendation"] if "Recommendation" in out.columns else pd.Series("", index=out.index)
-    )
-    out["Verdict"] = [
-        _verdict_label(rec, score)
-        for rec, score in zip(recommendations, overall, strict=False)
     ]
     out["Units"] = out.get("Legal Units", pd.Series(dtype=object)).map(_units_label)
     out["Trailer"] = [
@@ -269,11 +281,11 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
         coord_map = coordinates_for(property_ids.tolist())
     except Exception:  # noqa: BLE001
         coord_map = {}
-    out["Flood"] = [
-        flood_display_for_property(
-            pid,
-            stored,
-            display,
+    assessments = [
+        resolve_flood_assessment(
+            property_id=pid,
+            neighbourhood_label=display,
+            sheet_flood_label=stored,
             lat=coord_map.get(pid, (None, None))[0],
             lon=coord_map.get(pid, (None, None))[1],
         )
@@ -281,7 +293,136 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
             property_ids, flood_stored, out["Neighbourhood display"], strict=False
         )
     ]
+    out["Flood"] = [flood_display_text(item) for item in assessments]
+    out["Flood gate"] = [is_special_flood_hazard(item) for item in assessments]
+    _apply_flood_zone_scores(out, assessments)
+    _apply_franklinton_climate(out)
+
+    ai_overall = pd.to_numeric(
+        out["Overall"] if "Overall" in out.columns else pd.Series(pd.NA, index=out.index),
+        errors="coerce",
+    ).astype(float)
+    out["Overall AI"] = ai_overall
+    wow = pd.to_numeric(
+        out.get("Wow Factor", pd.Series(dtype=float, index=out.index)),
+        errors="coerce",
+    )
+    blended = ai_overall.copy()
+    for idx in out.index:
+        if bool(out.at[idx, "Flood gate"]) or bool(out.at[idx, "Climate cap"]):
+            continue
+        personal = wow_factor_value(wow.at[idx])
+        ai = ai_overall.at[idx]
+        if personal is not None and pd.notna(ai):
+            blended.at[idx] = blend_with_personal_score(float(ai), personal)
+    out["Overall"] = blended
+    overall = out["Overall"]
+    out["Match /100"] = overall * 10
+    recommendations = (
+        out["Recommendation"] if "Recommendation" in out.columns else pd.Series("", index=out.index)
+    )
+    out["Verdict"] = [
+        "Pass" if gate or climate else _verdict_label(rec, score)
+        for gate, climate, rec, score in zip(
+            out["Flood gate"], out["Climate cap"], recommendations, overall, strict=False
+        )
+    ]
     return out
+
+
+def _apply_flood_zone_scores(out: pd.DataFrame, assessments: list) -> None:
+    """Mapped FEMA flood zones: cap climate and risk, recompute match, force Reject."""
+    if not any(is_special_flood_hazard(item) for item in assessments):
+        return
+    for col in ("Climate", "Risk", "Overall", *SCORE_COLUMNS):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype(float)
+    try:
+        weights = parse_weights()
+    except ValueError:
+        weights = None
+    for idx, assessment in zip(out.index, assessments, strict=False):
+        if not is_special_flood_hazard(assessment):
+            continue
+        cap = float(assessment.score_10)
+        for col in ("Climate", "Risk"):
+            if col not in out.columns:
+                continue
+            current = out.at[idx, col]
+            try:
+                value = float(current)
+            except (TypeError, ValueError):
+                value = cap
+            if pd.isna(value):
+                value = cap
+            out.at[idx, col] = min(value, cap)
+        if weights is not None:
+            cats: dict[str, float] = {}
+            complete = True
+            for col in SCORE_COLUMNS:
+                raw = out.at[idx, col] if col in out.columns else None
+                try:
+                    cats[col.lower()] = float(raw)
+                except (TypeError, ValueError):
+                    complete = False
+                    break
+            if complete:
+                out.at[idx, "Overall"] = compute_overall(cats, weights)
+        if "Recommendation" in out.columns:
+            out.at[idx, "Recommendation"] = "Reject"
+
+
+# Franklinton flood exposure. Climate's 11% weight cannot sink a high match on its own,
+# so a failed climate score also caps the match.
+_FRANKLINTON_CLIMATE = 1.0
+_FRANKLINTON_OVERALL_CAP = 4.0
+
+
+def _is_franklinton(label: object) -> bool:
+    return "franklinton" in str(label or "").lower()
+
+
+def _apply_franklinton_climate(out: pd.DataFrame) -> None:
+    """Very low climate resilience in Franklinton, and a weak match score."""
+    displays = out.get("Neighbourhood display", pd.Series("", index=out.index))
+    flags = [_is_franklinton(label) for label in displays]
+    out["Climate cap"] = flags
+    if not any(flags):
+        return
+    for col in ("Climate", "Overall", *SCORE_COLUMNS):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype(float)
+    try:
+        weights = parse_weights()
+    except ValueError:
+        weights = None
+    for idx, flag in zip(out.index, flags, strict=False):
+        if not flag:
+            continue
+        if "Climate" in out.columns:
+            out.at[idx, "Climate"] = _FRANKLINTON_CLIMATE
+        recomputed = None
+        if weights is not None:
+            cats: dict[str, float] = {}
+            complete = True
+            for col in SCORE_COLUMNS:
+                raw = out.at[idx, col] if col in out.columns else None
+                try:
+                    cats[col.lower()] = float(raw)
+                except (TypeError, ValueError):
+                    complete = False
+                    break
+            if complete:
+                recomputed = compute_overall(cats, weights)
+        if "Overall" in out.columns:
+            if recomputed is None:
+                try:
+                    recomputed = float(out.at[idx, "Overall"])
+                except (TypeError, ValueError):
+                    recomputed = _FRANKLINTON_OVERALL_CAP
+            out.at[idx, "Overall"] = min(recomputed, _FRANKLINTON_OVERALL_CAP)
+        if "Recommendation" in out.columns:
+            out.at[idx, "Recommendation"] = "Reject"
 
 
 def _area_market_note(display: object, area_note: str | None, property_score: object) -> str:
@@ -394,15 +535,94 @@ def personal_col_index(header: str) -> int:
     return HEADERS.index(header) + 1
 
 
+def personal_note_text(value: object) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in ("nan", "none") else text
+
+
+def save_personal_rating(
+    row: pd.Series,
+    *,
+    wow_factor: float | None,
+    notes: str,
+) -> tuple[int, list[str]]:
+    """Update Wow Factor (your /10) and Notes for one property."""
+    payload: dict[str, Any] = {
+        "Property ID": row["Property ID"],
+        "Region": row["Region"],
+        "_sheet_row": row.get("_sheet_row"),
+    }
+    for col in PERSONAL_COLUMN_LIST:
+        if col == "Wow Factor":
+            payload[col] = "" if wow_factor is None else wow_factor
+        elif col == "Notes":
+            payload[col] = notes
+        else:
+            val = row.get(col, "")
+            payload[col] = "" if pd.isna(val) else val
+    return save_personal_edits(pd.DataFrame([payload]))
+
+
+def judgment_reason_text(value: object) -> str:
+    return personal_note_text(value)
+
+
+def final_judgment_label(value: object) -> str:
+    text = personal_note_text(value)
+    if text in (JUDGMENT_VISIT, JUDGMENT_REJECT):
+        return text
+    return ""
+
+
+def save_personal_judgment(
+    row: pd.Series,
+    *,
+    decision: str | None,
+    reason: str,
+) -> tuple[int, list[str]]:
+    """Final Decision = Visit | Reject; reason in appended Judgment reason column."""
+    payload: dict[str, Any] = {
+        "Property ID": row["Property ID"],
+        "Region": row["Region"],
+        "_sheet_row": row.get("_sheet_row"),
+    }
+    for col in PERSONAL_COLUMN_LIST:
+        if col == "Final Decision":
+            payload[col] = decision or ""
+        elif col == "Judgment reason":
+            payload[col] = reason
+        elif col == "Wow Factor":
+            val = row.get(col, "")
+            payload[col] = "" if pd.isna(val) else val
+        elif col == "Notes":
+            payload[col] = personal_note_text(row.get("Notes"))
+        else:
+            val = row.get(col, "")
+            payload[col] = "" if pd.isna(val) else val
+    return save_personal_edits(pd.DataFrame([payload]))
+
+
+def save_personal_note(row: pd.Series, notes: str) -> tuple[int, list[str]]:
+    """Update only the Notes personal column for one property row."""
+    return save_personal_rating(
+        row,
+        wow_factor=wow_factor_value(row.get("Wow Factor")),
+        notes=notes,
+    )
+
+
 def save_personal_edits(edits: pd.DataFrame) -> tuple[int, list[str]]:
     """Write personal columns only. Returns (rows updated, error messages)."""
     if edits.empty:
         return 0, []
 
-    personal_start = HEADERS.index("Wow Factor") + 1
-    personal_end = HEADERS.index("Final Decision") + 1
-    start_cell = f"{_col_letter(personal_start)}"
-    end_cell = f"{_col_letter(personal_end)}"
+    block_start = HEADERS.index("Wow Factor") + 1
+    block_end = HEADERS.index("Final Decision") + 1
+    block_start_cell = f"{_col_letter(block_start)}"
+    block_end_cell = f"{_col_letter(block_end)}"
+    reason_col = HEADERS.index("Judgment reason") + 1 if "Judgment reason" in HEADERS else None
 
     count = 0
     errors: list[str] = []
@@ -410,6 +630,7 @@ def save_personal_edits(edits: pd.DataFrame) -> tuple[int, list[str]]:
         ws = open_worksheet(str(region))
         row_map = property_id_row_map(ws)
         batch: list[dict[str, Any]] = []
+        rows_ok = 0
         for _, row in group.iterrows():
             property_id = str(row["Property ID"]).strip()
             try:
@@ -417,23 +638,34 @@ def save_personal_edits(edits: pd.DataFrame) -> tuple[int, list[str]]:
             except ValueError as exc:
                 errors.append(str(exc))
                 continue
-            values: list[Any] = []
-            for col in PERSONAL_COLUMN_LIST:
+            rows_ok += 1
+            block_values: list[Any] = []
+            for col in PERSONAL_SHEET_BLOCK:
                 val = row.get(col, "")
                 if pd.isna(val):
                     val = ""
                 elif col == "Visit Date" and val != "":
                     val = str(val)[:10]
-                values.append(val)
+                block_values.append(val)
             batch.append(
                 {
-                    "range": f"{start_cell}{sheet_row}:{end_cell}{sheet_row}",
-                    "values": [values],
+                    "range": f"{block_start_cell}{sheet_row}:{block_end_cell}{sheet_row}",
+                    "values": [block_values],
                 }
             )
+            if reason_col is not None:
+                reason_val = row.get("Judgment reason", "")
+                if pd.isna(reason_val):
+                    reason_val = ""
+                batch.append(
+                    {
+                        "range": f"{_col_letter(reason_col)}{sheet_row}",
+                        "values": [[reason_val]],
+                    }
+                )
         if batch:
             ws.batch_update(batch, value_input_option="USER_ENTERED")
-            count += len(batch)
+            count += rows_ok
     return count, errors
 
 

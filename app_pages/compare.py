@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import html
+import json
 import sys
 import urllib.parse
 from pathlib import Path
+from typing import Any
 
 import altair as alt
 import pandas as pd
@@ -24,12 +26,20 @@ from photos import (  # noqa: E402
     find_property_photo,
     readable_property_name,
 )
+from flood_lookup import FLOOD_GATE_VERSION  # noqa: E402
 from neighbourhood_tiers import RULES_VERSION, neighbourhood_search_tier  # noqa: E402
+from scoring import (  # noqa: E402
+    PERSONAL_MATCH_WEIGHT,
+    compute_overall,
+    parse_weights,
+    wow_factor_value,
+)
 from sheets_data import (  # noqa: E402
     PERSONAL_COLUMN_LIST,
     SCORE_COLUMNS,
     add_derived_columns,
     load_properties,
+    personal_note_text,
     save_personal_edits,
 )
 from ui_helpers import (  # noqa: E402
@@ -37,12 +47,29 @@ from ui_helpers import (  # noqa: E402
     format_currency,
     normalize_listing_url,
     property_title_html,
+    show_neighbourhood_dialog,
+    show_judgment_dialog,
+    show_property_note_dialog,
+    rationale_to_bullets,
     render_bullet_list,
 )
+from utils import load_strategy_raw_for_region  # noqa: E402
+from contacted import contacted_ids, contingent_ids, toggle_contacted, toggle_contingent  # noqa: E402
+from compare_table import (  # noqa: E402
+    COMPARE_TABLE_HEADERS,
+    annual_tax_label,
+    default_sort_ascending,
+    hood_badge_html,
+    neighbourhood_label,
+    num,
+    render_table_html,
+    sort_compare_dataframe,
+)
+from neighbourhood_tiers import score_note_10, tier_short_label  # noqa: E402
 from write_to_sheets import list_regions, sheet_url  # noqa: E402
 
 RECOMMENDATIONS = ["Reject", "Save", "Worth visiting"]
-FINAL_DECISIONS = ["Pursue", "Maybe", "Pass", "Visited", "Offer made"]
+FINAL_DECISIONS = ["Visit", "Reject", "Pursue", "Maybe", "Pass", "Visited", "Offer made"]
 ALL_PROPERTIES_TAB = "All properties"
 CHART_HEIGHT = 300
 
@@ -66,27 +93,6 @@ COMPARE_COLUMNS = [
 
 NOTES_COLUMNS = ["Property ID", "Region", "_sheet_row", *PERSONAL_COLUMN_LIST]
 
-# (header label, sort key) — keys handled in sort_compare_dataframe
-COMPARE_TABLE_HEADERS: list[tuple[str, str]] = [
-    ("Property", "property"),
-    ("Neighbourhood", "location"),
-    ("Price", "price"),
-    ("House", "house_size"),
-    ("Lot", "lot_size"),
-    ("HOA / mo", "hoa"),
-    ("Units", "units"),
-    ("Est. gross rent", "gross_rent"),
-    ("Est. net yield", "net_yield"),
-    ("Garage / trailer", "trailer"),
-    ("Flood risk", "flood"),
-    ("Current transit", "transit_now"),
-    ("Future transit", "transit_future"),
-    ("Appreciation", "appreciation"),
-    ("Rental", "rental"),
-    ("Match", "overall"),
-    ("Verdict", "verdict"),
-]
-
 # Matches sheets_data._verdict_label — sort by what the Verdict column shows.
 _VERDICT_ORDER = {
     "Buy": 0,
@@ -108,8 +114,9 @@ def cached_load_properties(
     regions: tuple[str, ...],
     _generation: int,
     _hood_rules: int,
+    _flood_gate: int,
 ) -> pd.DataFrame:
-    del _generation, _hood_rules  # bust cache after refresh or tier rule changes
+    del _generation, _hood_rules, _flood_gate  # bust cache after refresh or rule changes
     return load_properties(list(regions))
 
 
@@ -133,6 +140,18 @@ def _default_sort_ascending(sort_key: str) -> bool:
     return sort_key in {"property", "location", "trailer", "transit_now", "transit_future", "verdict"}
 
 
+def _compare_nav_href(**extra: str) -> str:
+    sort_key, sort_asc = _sync_compare_sort()
+    params: dict[str, str] = {
+        "compare_sort": sort_key,
+        "compare_dir": "asc" if sort_asc else "desc",
+    }
+    for key, value in extra.items():
+        if value:
+            params[key] = value
+    return "?" + urllib.parse.urlencode(params)
+
+
 def _sort_header_link(
     label: str,
     sort_key: str,
@@ -146,7 +165,7 @@ def _sort_header_link(
     if is_active:
         next_asc = not active_asc
     else:
-        next_asc = _default_sort_ascending(sort_key)
+        next_asc = default_sort_ascending(sort_key)
     params: dict[str, str] = {
         "compare_sort": sort_key,
         "compare_dir": "asc" if next_asc else "desc",
@@ -161,221 +180,228 @@ def _sort_header_link(
     if sticky:
         cls += " pc-sticky-prop pc-sticky-head"
     if sticky_end:
-        cls += " pc-sticky-verdict pc-sticky-verdict-head"
+        cls += " pc-verdict-col pc-verdict-head"
     inner = f"{html.escape(label)}{arrow}"
     return f'<a class="{cls}" href="{html.escape(href)}">{inner}</a>'
 
 
-def _fraction_10(series: pd.Series) -> pd.Series:
-    extracted = series.astype(str).str.extract(r"([\d.]+)\s*/\s*10", expand=False)
-    return pd.to_numeric(extracted, errors="coerce")
-
-
-def _potential_sort_series(
-    df: pd.DataFrame,
-    *,
-    label_column: str,
-    score_column: str,
-) -> pd.Series:
-    """Numeric sort key aligned with Appreciation / Rental cells (X/10 labels, then category score)."""
-    labels = df.get(label_column, pd.Series("", index=df.index))
-    from_label = _fraction_10(labels)
-    scores = pd.to_numeric(
-        df.get(score_column, pd.Series(dtype=float, index=df.index)),
-        errors="coerce",
-    )
-    return from_label.where(from_label.notna(), scores)
-
-
-def _flood_rank(series: pd.Series) -> pd.Series:
-    def rank(cell: object) -> int:
-        text = str(cell or "")
-        if "🔴" in text or text.startswith("High"):
-            return 3
-        if "🟡" in text or text.startswith("Moderate"):
-            return 2
-        if "🟢" in text or text.startswith("Low"):
-            return 1
-        return 0
-
-    return series.map(rank)
-
-
-def _neighbourhood_name_sort_series(df: pd.DataFrame) -> pd.Series:
-    if "Neighbourhood display" in df.columns:
-        return df["Neighbourhood display"].fillna("").astype(str).str.lower()
-    return (
-        df.get("City", pd.Series("", index=df.index)).fillna("").astype(str)
-        + ", "
-        + df.get("State", pd.Series("", index=df.index)).fillna("").astype(str)
-    ).str.lower()
-
-
-def _neighbourhood_tier_sort_series(df: pd.DataFrame) -> pd.Series:
-    if "Neighbourhood tier" in df.columns:
-        tiers = pd.to_numeric(df["Neighbourhood tier"], errors="coerce")
-    else:
-        tiers = df.get("Neighbourhood display", pd.Series("", index=df.index)).map(
-            neighbourhood_search_tier
-        )
-    return tiers.fillna(99)
-
-
-def _commute_sort_series(df: pd.DataFrame) -> pd.Series:
-    if "Commute (min)" in df.columns:
-        return pd.to_numeric(df["Commute (min)"], errors="coerce")
-    walk = df.get("Walk to Station", pd.Series("", index=df.index)).astype(str)
-    mins = walk.str.extract(r"(\d+)", expand=False)
-    return pd.to_numeric(mins, errors="coerce")
-
-
-def sort_compare_dataframe(
-    df: pd.DataFrame,
-    sort_key: str,
-    *,
-    ascending: bool,
-) -> pd.DataFrame:
-    if df.empty:
-        return df
-    out = df.copy()
-    key = sort_key.lower()
-
-    if key == "property":
-        series = out["Property ID"].astype(str).str.lower()
-        return out.assign(_sort=series).sort_values("_sort", ascending=ascending, na_position="last").drop(
-            columns="_sort"
-        )
-    if key == "location":
-        tier_series = _neighbourhood_tier_sort_series(out)
-        name_series = _neighbourhood_name_sort_series(out)
-        return out.assign(_tier=tier_series, _name=name_series).sort_values(
-            ["_tier", "_name"],
-            ascending=[ascending, True],
-            na_position="last",
-        ).drop(columns=["_tier", "_name"])
-    if key == "price":
-        return out.sort_values("Price", ascending=ascending, na_position="last")
-    if key == "house_size":
-        if "House Size" in out.columns:
-            return out.sort_values("House Size", ascending=ascending, na_position="last")
-    if key == "lot_size":
-        if "Land Size" in out.columns:
-            return out.sort_values("Land Size", ascending=ascending, na_position="last")
-    if key == "hoa":
-        return out.sort_values("HOA", ascending=ascending, na_position="last")
-    if key == "units":
-        col = "Legal Units" if "Legal Units" in out.columns else "Units"
-        if col in out.columns:
-            return out.sort_values(col, ascending=ascending, na_position="last")
-    if key == "gross_rent":
-        if "Estimated Rent" in out.columns:
-            return out.sort_values("Estimated Rent", ascending=ascending, na_position="last")
-    if key == "net_yield":
-        if "Est. net yield %" in out.columns:
-            return out.sort_values("Est. net yield %", ascending=ascending, na_position="last")
-    if key == "trailer":
-        if "Trailer" in out.columns:
-            return out.sort_values(
-                "Trailer",
-                ascending=ascending,
-                na_position="last",
-                key=lambda s: s.astype(str).str.lower(),
-            )
-    if key == "flood":
-        return out.assign(_sort=_flood_rank(out.get("Flood", pd.Series("", index=out.index)))).sort_values(
-            "_sort", ascending=ascending, na_position="last"
-        ).drop(columns="_sort")
-    if key == "transit_now":
-        return out.assign(_sort=_commute_sort_series(out)).sort_values(
-            "_sort", ascending=ascending, na_position="last"
-        ).drop(columns="_sort")
-    if key == "transit_future":
-        if "Transit future" in out.columns:
-            return out.sort_values(
-                "Transit future",
-                ascending=ascending,
-                na_position="last",
-                key=lambda s: s.astype(str).str.lower(),
-            )
-    if key == "appreciation":
-        series = _potential_sort_series(
-            out, label_column="Appreciation label", score_column="Appreciation"
-        )
-        return out.assign(_sort=series).sort_values(
-            "_sort", ascending=ascending, na_position="last"
-        ).drop(columns="_sort")
-    if key == "rental":
-        series = _potential_sort_series(
-            out, label_column="Rental potential", score_column="Rental"
-        )
-        return out.assign(_sort=series).sort_values(
-            "_sort", ascending=ascending, na_position="last"
-        ).drop(columns="_sort")
-    if key == "verdict":
-        verdicts = out.get("Verdict", pd.Series("", index=out.index)).astype(str).str.strip()
-        order = verdicts.map(_VERDICT_ORDER).fillna(99)
-        overall = out["Overall"] if "Overall" in out.columns else pd.Series(0.0, index=out.index)
-        return out.assign(_sort=order).sort_values(
-            ["_sort", "Overall"],
-            ascending=[ascending, False],
-            na_position="last",
-        ).drop(columns="_sort")
-    if key == "overall" and "Overall" in out.columns:
-        return out.sort_values("Overall", ascending=ascending, na_position="last")
-    return out.sort_values("Overall", ascending=False, na_position="last")
-
-
-def _clipped_cell(text: str, *, lines: int = 1) -> str:
-    safe = html.escape(str(text or "—").strip() or "—")
-    title = html.escape(str(text or "").strip())
-    title_attr = f' title="{title}"' if title else ""
-    if lines > 1:
-        return f'<div class="pc-cell-clamp"{title_attr}>{safe}</div>'
-    return f'<div class="pc-cell-clip"{title_attr}>{safe}</div>'
-
-
-def _sqft_label(value: object) -> str:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return "—"
+def render_match_score_breakdown(row: pd.Series) -> None:
+    """Category scores and weighted contributions for the overall match."""
+    region = str(row.get("Region") or "").strip() or None
     try:
-        sqft = float(value)
-    except (TypeError, ValueError):
-        return "—"
-    if sqft <= 0:
-        return "—"
-    return f"{int(round(sqft)):,} sf"
+        weights = parse_weights(load_strategy_raw_for_region(region))
+    except ValueError as exc:
+        st.warning(f"Could not load strategy weights: {exc}")
+        weights = {}
 
+    overall = row.get("Overall")
+    overall_label = f"{float(overall):.2f}/10" if pd.notna(overall) else "—"
+    match_100 = row.get("Match /100")
+    match_label = f"{float(match_100):.0f}/100" if pd.notna(match_100) else "—"
+    ai_overall = row.get("Overall AI")
+    ai_label = f"{float(ai_overall):.2f}/10" if pd.notna(ai_overall) else "—"
+    yours = wow_factor_value(row.get("Wow Factor"))
 
-def _neighbourhood_label(row: pd.Series) -> str:
-    hood = str(row.get("Neighbourhood display") or "").strip()
-    if hood and hood not in ("—", "nan", "None"):
-        return hood
-    city = str(row.get("City") or "").strip()
-    state = str(row.get("State") or "").strip()
-    return f"{city}, {state}".strip(" ,") or "—"
-
-
-def _hood_tier(row: pd.Series) -> int | None:
+    rec = str(row.get("Recommendation") or "—")
+    st.markdown(f"**Match (displayed):** {overall_label} ({match_label}) · **{rec}**")
+    if yours is not None and pd.notna(ai_overall):
+        pct = int(round(PERSONAL_MATCH_WEIGHT * 100))
+        st.caption(
+            f"AI match **{ai_label}** + your **{yours:g}/10** "
+            f"({100 - pct}% / {pct}% blend) → **{overall_label}**."
+        )
+    elif pd.notna(ai_overall):
+        st.caption(f"AI match **{ai_label}**. Set **Your /10** in the table to blend in your score.")
+    hood = neighbourhood_label(row)
     tier = row.get("Neighbourhood tier")
-    if tier is not None and not (isinstance(tier, float) and pd.isna(tier)):
+    tier_label = tier_short_label(int(tier)) if pd.notna(tier) else "unranked"
+    area_app = str(row.get("Appreciation label") or "—")
+    area_rent = str(row.get("Rental potential") or "—")
+    prop_app = score_note_10(float(row["Appreciation"])) if pd.notna(row.get("Appreciation")) else "—"
+    prop_rent = score_note_10(float(row["Rental"])) if pd.notna(row.get("Rental")) else "—"
+    prop_loc = score_note_10(float(row["Location"])) if pd.notna(row.get("Location")) else "—"
+    st.caption(
+        f"**{hood}** ({tier_label.lower()}) — table columns **Area appr.** / **Area rental** "
+        f"show neighbourhood benchmarks ({area_app}, {area_rent}). "
+        f"This breakdown uses **property** scores from analysis "
+        f"(appreciation {prop_app}, rental {prop_rent}, location {prop_loc}). "
+        "**Location** is commute, transit, and amenities for this listing, not the neighbourhood colour alone."
+    )
+    st.caption(
+        "Overall = sum of (category score × weight). Weights come from your strategy for this region."
+    )
+
+    note = personal_note_text(row.get("Notes"))
+    with theme_css.card("match_personal_note"):
+        theme_css.section("Your rating", "edit_note", "mint")
+        if yours is not None:
+            st.markdown(f"**Your score:** {yours:g}/10")
+        else:
+            st.caption("No personal /10 yet — use **Your /10** in the table.")
+        if note:
+            st.markdown(note)
+        pid = str(row["Property ID"])
+        if st.button("Edit your /10 and note", key=f"edit_note_from_match_{pid}"):
+            st.query_params["note"] = pid
+            st.query_params.pop("scores", None)
+            st.rerun()
+
+    rows: list[dict[str, object]] = []
+    weighted_sum = 0.0
+    for col in SCORE_COLUMNS:
+        score = row.get(col)
+        if pd.isna(score):
+            continue
+        score_f = float(score)
+        wkey = col.lower()
+        weight = float(weights.get(wkey, 0.0)) if weights else 0.0
+        contrib = score_f * weight
+        weighted_sum += contrib
+        rows.append(
+            {
+                "Category": col,
+                "Score": score_f,
+                "Weight %": round(weight * 100, 1),
+                "Contribution": round(contrib, 2),
+            }
+        )
+
+    if not rows:
+        st.info("No category scores on file for this property.", icon=":material/info:")
+        return
+
+    breakdown = pd.DataFrame(rows).sort_values("Contribution", ascending=False)
+    st.dataframe(
+        breakdown,
+        column_config={
+            "Score": st.column_config.NumberColumn(format="%.1f"),
+            "Weight %": st.column_config.NumberColumn(format="%.1f"),
+            "Contribution": st.column_config.NumberColumn(format="%.2f"),
+        },
+        hide_index=True,
+        width="stretch",
+    )
+
+    if weights and not row.get("Climate cap"):
         try:
-            return int(tier)
-        except (TypeError, ValueError):
+            cats = {c.lower(): float(row[c]) for c in SCORE_COLUMNS if pd.notna(row.get(c))}
+            if len(cats) == len(weights):
+                recomputed = compute_overall(cats, weights)
+                st.caption(f"Recomputed from categories: **{recomputed:.2f}/10**")
+        except (ValueError, TypeError):
             pass
-    return neighbourhood_search_tier(_neighbourhood_label(row))
+    if row.get("Climate cap"):
+        st.caption(
+            "Climate resilience is 1/10 because of flood exposure. "
+            "That caps the match score at 4.0, so a high appreciation score cannot carry the listing."
+        )
+
+    detail_href = _compare_nav_href(detail=str(row["Property ID"]))
+    st.markdown(f"[Full property details]({detail_href})")
 
 
-def _hood_badge_html(row: pd.Series) -> str:
-    return theme_css.hood_tier_badge_html(_neighbourhood_label(row), _hood_tier(row))
-
-
-def num(value: object, fmt: str = "{:,.0f}", fallback: str = "—") -> str:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return fallback
+def _load_scored_from_disk(property_id: str) -> dict[str, Any]:
+    path = ROOT / "properties" / str(property_id) / "latest.json"
+    if not path.is_file():
+        return {}
     try:
-        return fmt.format(float(value))
-    except (TypeError, ValueError):
-        return fallback
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    scored = data.get("scored")
+    return scored if isinstance(scored, dict) else {}
+
+
+def _verdict_derivation_note(
+    verdict: str,
+    recommendation: str,
+    overall: float | None,
+    *,
+    flood_gate: bool = False,
+    climate_cap: bool = False,
+) -> str:
+    rec = (recommendation or "").strip()
+    score_txt = f"{overall:.1f}/10" if overall is not None else "—"
+    if climate_cap and verdict == "Pass":
+        return (
+            f"**{verdict}** because climate resilience is **1/10** (flood exposure). "
+            f"The match score is capped at **{score_txt}**."
+        )
+    if flood_gate and verdict == "Pass":
+        return (
+            f"**{verdict}** because this pin is in a mapped flood zone. "
+            f"Climate and risk were capped and the match score was recomputed (**{score_txt}**)."
+        )
+    if verdict == "Buy":
+        return (
+            f"**{verdict}** = model said **Worth visiting** and match score is **{score_txt}** (8.0 or higher)."
+        )
+    if verdict == "Strong candidate":
+        return (
+            f"**{verdict}** = **Worth visiting** with match **{score_txt}** below the 8.0 “Buy” threshold."
+        )
+    if verdict == "Investigate":
+        return f"**{verdict}** = model recommendation **Save** (worth a closer look; match **{score_txt}**)."
+    if verdict == "Pass":
+        return f"**{verdict}** = model recommendation **Reject** (match **{score_txt}**)."
+    if rec:
+        return f"Display label **{verdict}** from recommendation **{rec}** (match **{score_txt}**)."
+    return f"Match score **{score_txt}**."
+
+
+def render_verdict_explanation(row: pd.Series) -> None:
+    pid = str(row["Property ID"])
+    verdict = str(row.get("Verdict") or "—")
+    rec = str(row.get("Recommendation") or "—")
+    overall = float(row["Overall"]) if pd.notna(row.get("Overall")) else None
+
+    scored = _load_scored_from_disk(pid)
+    rationale = str(scored.get("rationale") or "").strip()
+
+    flood_gate = bool(row.get("Flood gate"))
+    climate_cap = bool(row.get("Climate cap"))
+    st.markdown(
+        _verdict_derivation_note(
+            verdict, rec, overall, flood_gate=flood_gate, climate_cap=climate_cap
+        )
+    )
+    st.caption(
+        "Verdict labels map the model’s Reject / Save / Worth visiting plus your match score. "
+        "Narrative below is from the analysis run (same as Analyze)."
+    )
+
+    if rationale:
+        st.markdown("**Why this recommendation**")
+        render_bullet_list(rationale_to_bullets(rationale))
+    else:
+        st.info(
+            "No saved rationale text for this property (older Sheet row or analysis run missing). "
+            "Strengths and flags below are from the Sheet.",
+            icon=":material/info:",
+        )
+
+    strengths = scored.get("strengths") or bullets_to_list(row.get("Strengths"))
+    weaknesses = scored.get("weaknesses") or bullets_to_list(row.get("Weaknesses"))
+    red_flags = scored.get("red_flags") or bullets_to_list(row.get("Red Flags"))
+    questions = scored.get("questions_to_ask") or bullets_to_list(row.get("Questions to Ask"))
+
+    if strengths:
+        st.markdown("**Strengths**")
+        render_bullet_list(strengths)
+    if weaknesses:
+        st.markdown("**Weaknesses**")
+        render_bullet_list(weaknesses)
+    if red_flags:
+        st.markdown("**Red flags**")
+        render_bullet_list(red_flags)
+    if questions:
+        st.markdown("**Questions to ask**")
+        render_bullet_list(questions)
+
+    st.markdown(
+        f"[Match score breakdown]({_compare_nav_href(scores=pid)}) · "
+        f"[Full property details]({_compare_nav_href(detail=pid)})"
+    )
 
 
 def apply_filters(
@@ -387,8 +413,12 @@ def apply_filters(
     min_overall: float,
     max_commute: float | None,
     min_beds: int,
+    hide_rejected: bool = False,
 ) -> pd.DataFrame:
     out = df.copy()
+    if hide_rejected and "Final Decision" in out.columns:
+        labels = out["Final Decision"].fillna("").astype(str).str.strip()
+        out = out[labels.str.casefold() != "reject"]
     if regions:
         out = out[out["Region"].isin(regions)]
     if recommendations:
@@ -454,7 +484,7 @@ def render_property_dialog(row: pd.Series) -> None:
             st.image(str(photo_path), width="stretch")
         with right:
             theme_css.chip_row(
-                _hood_badge_html(row),
+                hood_badge_html(row, href=_compare_nav_href(hood=neighbourhood_label(row))),
                 f'<span class="pc-chip">{html.escape(str(row.get("Recommendation", "")))}</span>',
                 f'<span class="pc-chip">Overall {html.escape(num(row.get("Overall"), "{:.1f}"))}/10</span>',
                 f'<span class="pc-chip">{html.escape(str(row.get("Region", "")))}</span>',
@@ -463,6 +493,7 @@ def render_property_dialog(row: pd.Series) -> None:
                 [
                     ("Price", "$" + num(row.get("Price")), "sell", "peach", ""),
                     ("Rent / mo", "$" + num(row.get("Estimated Rent")), "savings", "mint", ""),
+                    ("Annual tax", annual_tax_label(row), "receipt_long", "amber", ""),
                     ("Gross yield", num(row.get("Gross yield %"), "{:.1f}") + "%", "percent", "violet", ""),
                     ("Commute", num(row.get("Commute (min)")) + " min", "train", "blue", ""),
                 ],
@@ -470,7 +501,7 @@ def render_property_dialog(row: pd.Series) -> None:
             )
     else:
         theme_css.chip_row(
-            _hood_badge_html(row),
+            hood_badge_html(row, href=_compare_nav_href(hood=neighbourhood_label(row))),
             f'<span class="pc-chip">{html.escape(str(row.get("Recommendation", "")))}</span>',
             f'<span class="pc-chip">Overall {html.escape(num(row.get("Overall"), "{:.1f}"))}/10</span>',
             f'<span class="pc-chip">{html.escape(str(row.get("Region", "")))}</span>',
@@ -479,11 +510,27 @@ def render_property_dialog(row: pd.Series) -> None:
             [
                 ("Price", "$" + num(row.get("Price")), "sell", "peach", ""),
                 ("Rent / mo", "$" + num(row.get("Estimated Rent")), "savings", "mint", ""),
+                ("Annual tax", annual_tax_label(row), "receipt_long", "amber", ""),
                 ("Gross yield", num(row.get("Gross yield %"), "{:.1f}") + "%", "percent", "violet", ""),
                 ("Commute", num(row.get("Commute (min)")) + " min", "train", "blue", ""),
             ],
             min_width="170px",
         )
+
+    note = personal_note_text(row.get("Notes"))
+    yours_detail = wow_factor_value(row.get("Wow Factor"))
+    with theme_css.card("d_overall_note"):
+        theme_css.section("Your rating", "edit_note", "mint")
+        if yours_detail is not None:
+            st.markdown(f"**Your score:** {yours_detail:g}/10 (blends into Match)")
+        if note:
+            st.markdown(note)
+        elif yours_detail is None:
+            st.caption("Set **Your /10** in the table — optional note explains why.")
+        if st.button("Edit your /10 and note", key=f"edit_note_from_detail_{row['Property ID']}"):
+            st.query_params["note"] = str(row["Property ID"])
+            st.query_params.pop("detail", None)
+            st.rerun()
 
     st.space("small")
     c1, c2 = st.columns(2)
@@ -566,92 +613,68 @@ def render_compare_table(df: pd.DataFrame) -> None:
     with theme_css.card("table"):
         st.caption(
             "Click a column header to sort (click again to reverse). "
+            "Click a neighbourhood for area context. **Area appr.** / **Area rental** are neighbourhood "
+            "benchmarks; match score uses property-specific category scores (see match breakdown). "
+            "Check **Contacted** after you reach the agent, and **Contingent** if the listing goes under contract. "
+            "**Your /10** blends into Match (80% AI + 20% you when set). **Judgment** = Visit or Reject "
+            "(hover for reason). "
+            "Click **Match** or **Verdict** for score breakdown and recommendation rationale. "
             "Est. net yield is (annual rent − annual tax − insurance − HOA×12) ÷ price."
         )
-        n_cols = len(COMPARE_TABLE_HEADERS)
-        head_cells = [
-            _sort_header_link(
-                label,
-                key,
-                sticky=(idx == 0),
-                sticky_end=(idx == n_cols - 1),
-            )
-            for idx, (label, key) in enumerate(COMPARE_TABLE_HEADERS)
-        ]
-        head = "".join(head_cells)
-        grid_attr = theme_css.compare_grid_style_attr()
-        bodies: list[str] = []
-        for _, row in ranked.iterrows():
-            thumb = ensure_thumbnail(str(row["Property ID"]))
-            name_html = property_title_html(
-                readable_property_name(row["Property ID"]), row.get("Link")
-            )
-            verdict = str(row.get("Verdict") or "—")
-            match = row.get("Match /100")
-            match_label = f"{float(match):.0f}" if pd.notna(match) else "—"
-            score = float(row["Overall"]) if pd.notna(row.get("Overall")) else 0.0
-            score_pct = int(min(max(score / 10.0, 0.0), 1.0) * 100)
-            vclass = theme_css.verdict_class(verdict)
-            flood = str(row.get("Flood") or "—")
-            thumb_inner = (
-                f'<img class="pc-thumb" src="/app/static/property_thumbs/{html.escape(thumb.name)}" alt="" />'
-                if thumb is not None
-                else '<div class="pc-thumb pc-thumb-empty"></div>'
-            )
-            sticky_prop = (
-                f'<div class="pc-sticky-prop">{thumb_inner}'
-                f'<div class="pc-sticky-prop-text">{name_html}'
-                f"<div class='pc-prop-sub pc-cell-hood-clip'>{_hood_badge_html(row)}</div>"
-                f"</div></div>"
-            )
-            net = row.get("Est. net yield %")
-            net_label = f"{float(net):.1f}%" if pd.notna(net) else "—"
-            hoa_label = format_currency(row.get("HOA"))
-            if hoa_label in ("$0", "—"):
-                hoa_label = "—"
-            pid = html.escape(str(row["Property ID"]))
-            cells = [
-                sticky_prop,
-                f"<div class='pc-cell pc-cell-hood-clip'>{_hood_badge_html(row)}</div>",
-                f"<div class='pc-cell-strong'>${html.escape(num(row.get('Price')))}</div>",
-                f"<div class='pc-cell'>{_clipped_cell(_sqft_label(row.get('House Size')))}</div>",
-                f"<div class='pc-cell'>{_clipped_cell(_sqft_label(row.get('Land Size')))}</div>",
-                f"<div class='pc-cell'>{html.escape(hoa_label)}</div>",
-                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Units') or '—'))}</div>",
-                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Gross rent label') or '—'))}</div>",
-                f"<div class='pc-cell-strong'>{_clipped_cell(net_label)}</div>",
-                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Trailer') or '—'))}</div>",
-                f"<div class='pc-cell'>{theme_css.flood_risk_badge_html(flood)}</div>",
-                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Transit now') or '—'))}</div>",
-                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Transit future') or '—'))}</div>",
-                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Appreciation label') or '—'))}</div>",
-                f"<div class='pc-cell'>{_clipped_cell(str(row.get('Rental potential') or '—'))}</div>",
-                (
-                    "<div class='pc-match'>"
-                    f"<div class='pc-match-val'>{html.escape(match_label)}</div>"
-                    f"<div class='pc-match-bar'><div class='pc-match-fill' style='width:{score_pct}%'></div></div>"
-                    "</div>"
-                ),
-                (
-                    f"<div class='pc-sticky-verdict'><span class='pc-verdict {vclass}'>"
-                    f"{html.escape(verdict)}</span>"
-                    f"<div class='pc-prop-sub'><a href='?detail={pid}'>Details</a></div></div>"
-                ),
-            ]
-            if len(cells) != n_cols:
-                raise RuntimeError(
-                    f"Compare table column mismatch: {len(cells)} cells vs {n_cols} headers"
-                )
-            bodies.append(f'<div class="pc-compare-row"{grid_attr}>{"".join(cells)}</div>')
         st.html(
-            '<div class="pc-compare-wrap">'
-            f'<div class="pc-compare-head"{grid_attr}>{head}</div>'
-            + "".join(bodies)
-            + "</div>"
+            render_table_html(
+                ranked,
+                headers=COMPARE_TABLE_HEADERS,
+                sort_key=sort_key,
+                sort_asc=sort_asc,
+                href_builder=_compare_nav_href,
+                contacted_ids=contacted_ids(),
+                contacted_href=lambda pid: _compare_nav_href(contacted=pid),
+                contingent_ids=contingent_ids(),
+                contingent_href=lambda pid: _compare_nav_href(contingent=pid),
+                note_href=lambda pid: _compare_nav_href(note=pid),
+                judgment_href=lambda pid: _compare_nav_href(judgment=pid),
+            )
         )
         st.html(
             f'<div class="pc-table-foot"><span>Showing {len(ranked)} of {len(ranked)} properties</span></div>'
         )
+
+    verdict_id = st.query_params.get("verdict")
+    if verdict_id:
+        verdict_match = ranked[ranked["Property ID"] == verdict_id]
+        if not verdict_match.empty:
+            verdict_row = verdict_match.iloc[0]
+
+            @st.dialog(
+                f"Verdict — {readable_property_name(verdict_row['Property ID'])}",
+                width="large",
+            )
+            def show_verdict() -> None:
+                render_verdict_explanation(verdict_row)
+                if st.button("Close", key="close_compare_verdict"):
+                    st.query_params.pop("verdict", None)
+                    st.rerun()
+
+            show_verdict()
+
+    scores_id = st.query_params.get("scores")
+    if scores_id:
+        score_match = ranked[ranked["Property ID"] == scores_id]
+        if not score_match.empty:
+            score_row = score_match.iloc[0]
+
+            @st.dialog(
+                f"Match score — {readable_property_name(score_row['Property ID'])}",
+                width="large",
+            )
+            def show_scores() -> None:
+                render_match_score_breakdown(score_row)
+                if st.button("Close", key="close_compare_scores"):
+                    st.query_params.pop("scores", None)
+                    st.rerun()
+
+            show_scores()
 
     detail_id = st.query_params.get("detail") or st.session_state.get("compare_detail_id")
     if detail_id:
@@ -981,13 +1004,13 @@ def render_notes_tab(df: pd.DataFrame, original: pd.DataFrame) -> None:
     notes_df = df[NOTES_COLUMNS].copy()
     notes_df["Wow Factor"] = pd.to_numeric(notes_df["Wow Factor"], errors="coerce")
     notes_df["Visit Date"] = pd.to_datetime(notes_df["Visit Date"], errors="coerce")
-    for col in ("Notes", "Final Decision"):
+    for col in ("Notes", "Final Decision", "Judgment reason"):
         notes_df[col] = notes_df[col].fillna("").astype(str).replace("nan", "")
 
     with theme_css.card("notes"):
         theme_css.section("Your own scoring and follow-up", "edit_note", "mint")
         st.caption(
-            "These four columns are yours — the AI never overwrites them. "
+            "These personal columns are yours — the AI never overwrites them. "
             "Edit below, then save back to the Sheet."
         )
         edited = st.data_editor(
@@ -997,12 +1020,15 @@ def render_notes_tab(df: pd.DataFrame, original: pd.DataFrame) -> None:
                 "Region": st.column_config.TextColumn("Region", disabled=True, width="small"),
                 "_sheet_row": None,
                 "Wow Factor": st.column_config.NumberColumn(
-                    "Wow factor", min_value=0, max_value=10, step=1, format="%d"
+                    "Your /10", min_value=0, max_value=10, step=0.5, format="%.1f"
                 ),
-                "Notes": st.column_config.TextColumn("Notes", width="large"),
+                "Notes": st.column_config.TextColumn("Note (optional)", width="large"),
+                "Judgment reason": st.column_config.TextColumn("Judgment reason", width="large"),
                 "Visit Date": st.column_config.DateColumn("Visit date", format="YYYY-MM-DD"),
                 "Final Decision": st.column_config.SelectboxColumn(
-                    "Decision", options=["", *FINAL_DECISIONS], width="small"
+                    "Judgment (Visit / Reject)",
+                    options=["", *FINAL_DECISIONS],
+                    width="medium",
                 ),
             },
             hide_index=True,
@@ -1054,6 +1080,22 @@ def render_notes_tab(df: pd.DataFrame, original: pd.DataFrame) -> None:
 
 # --- Page ---
 
+_pending_contacted = st.query_params.get("contacted")
+if _pending_contacted:
+    toggle_contacted(str(_pending_contacted))
+    st.query_params.pop("contacted", None)
+    st.rerun()
+
+_pending_contingent = st.query_params.get("contingent")
+if _pending_contingent:
+    toggle_contingent(str(_pending_contingent))
+    st.query_params.pop("contingent", None)
+    st.rerun()
+
+_hood_label = st.query_params.get("hood")
+if _hood_label:
+    show_neighbourhood_dialog(str(_hood_label))
+
 theme_css.hero(
     "Property comparison",
     "All your properties, ranked and compared.",
@@ -1066,6 +1108,7 @@ try:
         tuple(all_regions),
         _sheets_cache_generation(),
         RULES_VERSION,
+        FLOOD_GATE_VERSION,
     )
 except Exception as exc:  # noqa: BLE001
     st.error(f"Could not load your Google Sheet: {exc}", icon=":material/cloud_off:")
@@ -1081,6 +1124,23 @@ if raw.empty:
     st.stop()
 
 raw = add_derived_columns(raw)
+
+
+def _clear_compare_property_cache() -> None:
+    cached_load_properties.clear()
+
+
+_note_id = st.query_params.get("note")
+if _note_id:
+    _note_match = raw[raw["Property ID"].astype(str) == str(_note_id)]
+    if not _note_match.empty:
+        show_property_note_dialog(_note_match.iloc[0], on_saved=_clear_compare_property_cache)
+
+_judgment_id = st.query_params.get("judgment")
+if _judgment_id:
+    _judgment_match = raw[raw["Property ID"].astype(str) == str(_judgment_id)]
+    if not _judgment_match.empty:
+        show_judgment_dialog(_judgment_match.iloc[0], on_saved=_clear_compare_property_cache)
 
 region_tab_labels = [*all_regions, ALL_PROPERTIES_TAB]
 _region_counts = raw.groupby("Region", sort=False).size().to_dict()
@@ -1144,6 +1204,13 @@ with st.sidebar:
         if st.checkbox(rec, value=True, key=f"verdict_{rec}"):
             rec_selected.append(rec)
 
+    hide_rejected = st.checkbox(
+        "Hide rejected listings",
+        value=False,
+        key="compare_hide_rejected",
+        help="Hides rows where your final judgment is Reject.",
+    )
+
     st.space("small")
     if st.button("Reset filters", icon=":material/restart_alt:", width="stretch"):
         for rec in RECOMMENDATIONS:
@@ -1168,6 +1235,7 @@ filtered = apply_filters(
     min_overall=min_overall,
     max_commute=max_commute,
     min_beds=min_beds,
+    hide_rejected=hide_rejected,
 )
 
 active_chips: list[str] = []

@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import socket
 import ssl
+import subprocess
+import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 import certifi
@@ -41,57 +46,371 @@ def _fetch_html_urllib(url: str, timeout: float = 30.0) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
-def _fetch_html_playwright(url: str, timeout_ms: int = 60_000) -> str:
+def _playwright_headed() -> bool:
+    return os.environ.get("ZILLOW_PLAYWRIGHT_HEADED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _playwright_profile_dir() -> Path | None:
+    raw = os.environ.get("ZILLOW_BROWSER_PROFILE", "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
+def _chrome_executable() -> str:
+    override = os.environ.get("ZILLOW_CHROME_PATH", "").strip()
+    if override:
+        return override
+    candidates = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    ]
+    for path in candidates:
+        if Path(path).is_file():
+            return path
+    return "google-chrome"
+
+
+def _cdp_endpoint() -> str:
+    return os.environ.get("ZILLOW_CDP_URL", "http://127.0.0.1:9222").strip()
+
+
+def _cdp_port() -> int:
+    endpoint = _cdp_endpoint()
+    m = re.search(r":(\d+)(?:/|$)", endpoint)
+    return int(m.group(1)) if m else 9222
+
+
+def _port_open(port: int, host: str = "127.0.0.1") -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.4):
+            return True
+    except OSError:
+        return False
+
+
+_chrome_proc: subprocess.Popen[bytes] | None = None
+_visible_chrome_state: dict[str, Any] = {"playwright": None, "context": None}
+_cdp_chrome_state: dict[str, Any] = {"playwright": None, "browser": None}
+
+
+def _reset_visible_chrome_state() -> None:
+    global _visible_chrome_state
+    pw = _visible_chrome_state.get("playwright")
+    ctx = _visible_chrome_state.get("context")
+    if ctx is not None:
+        try:
+            ctx.close()
+        except Exception:  # noqa: BLE001
+            pass
+    if pw is not None:
+        try:
+            pw.stop()
+        except Exception:  # noqa: BLE001
+            pass
+    _visible_chrome_state = {"playwright": None, "context": None}
+
+
+def _zillow_profile_dir() -> Path:
+    return _playwright_profile_dir() or (
+        Path(__file__).resolve().parent.parent / ".cache" / "zillow-chrome-profile"
+    )
+
+
+def _captcha_wait_sec() -> int:
+    try:
+        return max(30, int(os.environ.get("ZILLOW_CAPTCHA_WAIT_SEC", "300")))
+    except ValueError:
+        return 300
+
+
+def _focus_chrome_window() -> None:
+    if os.environ.get("ZILLOW_FOCUS_CHROME", "true").strip().lower() in ("0", "false", "no"):
+        return
+    chrome_app = "Google Chrome"
+    if "Brave" in _chrome_executable():
+        chrome_app = "Brave Browser"
+    try:
+        subprocess.run(
+            ["osascript", "-e", f'tell application "{chrome_app}" to activate'],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _listing_ready(html: str, url: str, dom_description: str) -> bool:
+    if len(dom_description.strip()) >= 40:
+        return True
+    if _blocked_by_zillow(html):
+        return False
+    return _parsed_text_len(html, url) >= 80
+
+
+def _wait_for_zillow_listing(page: Any, url: str) -> tuple[str, str]:
+    """Keep the tab open until the listing loads or the user finishes Zillow verification."""
+    max_sec = _captcha_wait_sec()
+    deadline = time.time() + max_sec
+    prompted = False
+    while time.time() < deadline:
+        try:
+            html = page.content()
+        except Exception:  # noqa: BLE001
+            time.sleep(1)
+            continue
+        dom = _dom_description_from_page(page)
+        if _listing_ready(html, url, dom):
+            return html, dom
+        if not prompted:
+            _focus_chrome_window()
+            print(
+                "\n*** Zillow verification — use the Chrome window (same tab). "
+                "Complete press-and-hold / captcha there. "
+                f"Waiting up to {max_sec // 60} minutes; leave Chrome open. ***\n",
+                flush=True,
+            )
+            prompted = True
+        time.sleep(2)
+    html = page.content()
+    dom = _dom_description_from_page(page)
+    return html, dom
+
+
+def _fetch_via_cdp(url: str, timeout_ms: int = 90_000) -> tuple[str, str]:
+    """Reuse one Chrome instance started with remote debugging (ZILLOW_AUTO_CDP)."""
+    from playwright.sync_api import sync_playwright
+
+    global _cdp_chrome_state
+    endpoint = _ensure_chrome_cdp()
+    if _cdp_chrome_state.get("browser") is None:
+        pw = sync_playwright().start()
+        browser = pw.chromium.connect_over_cdp(endpoint)
+        _cdp_chrome_state = {"playwright": pw, "browser": browser}
+    browser = _cdp_chrome_state["browser"]
+    context = browser.contexts[0] if browser.contexts else browser.new_context()
+    page = context.pages[0] if context.pages else context.new_page()
+    page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    return _wait_for_zillow_listing(page, url)
+
+
+def _fetch_via_visible_chrome(url: str, timeout_ms: int = 90_000) -> tuple[str, str]:
+    """Headed Chrome with a persistent profile — stays open for captcha (no CDP attach)."""
+    from playwright.sync_api import sync_playwright
+
+    global _visible_chrome_state
+    if _visible_chrome_state.get("context") is None:
+        profile = _zillow_profile_dir()
+        profile.mkdir(parents=True, exist_ok=True)
+        pw = None
+        try:
+            pw = sync_playwright().start()
+            context = pw.chromium.launch_persistent_context(
+                str(profile),
+                channel="chrome",
+                headless=False,
+                viewport={"width": 1280, "height": 900},
+                user_agent=_BROWSER_UA,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            _visible_chrome_state = {"playwright": pw, "context": context}
+        except Exception as exc:
+            if pw is not None:
+                try:
+                    pw.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+            _reset_visible_chrome_state()
+            msg = str(exc).lower()
+            if "already in use" in msg or "existing browser session" in msg:
+                return _fetch_via_cdp(url, timeout_ms=timeout_ms)
+            raise
+    context = _visible_chrome_state["context"]
+    page = context.pages[0] if context.pages else context.new_page()
+    page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    return _wait_for_zillow_listing(page, url)
+
+
+def _ensure_chrome_cdp() -> str:
+    """Start a dedicated Chrome with remote debugging when ZILLOW_AUTO_CDP is set."""
+    global _chrome_proc
+    endpoint = _cdp_endpoint()
+    port = _cdp_port()
+    if _port_open(port):
+        return endpoint
+
+    if os.environ.get("ZILLOW_AUTO_CDP", "").strip().lower() not in ("1", "true", "yes"):
+        return endpoint
+
+    profile = _playwright_profile_dir() or (
+        Path(__file__).resolve().parent.parent / ".cache" / "zillow-chrome-profile"
+    )
+    profile.mkdir(parents=True, exist_ok=True)
+    chrome = _chrome_executable()
+    args = [
+        chrome,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+    ]
+    _chrome_proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(40):
+        if _port_open(port):
+            time.sleep(0.5)
+            return endpoint
+        time.sleep(0.25)
+    raise RuntimeError(
+        "Could not start Chrome for Zillow import. "
+        f"Try manually: {chrome} --remote-debugging-port={port} "
+        f'--user-data-dir="{profile}"'
+    )
+
+
+def _dom_description_from_page(page: Any) -> str:
+    selectors = (
+        '[data-testid="description"]',
+        '[data-testid="home-description"]',
+        'div[class*="Description"]',
+        'div[class*="ds-description"]',
+    )
+    for sel in selectors:
+        try:
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                text = loc.first.inner_text(timeout=5000).strip()
+                if len(text) > 40:
+                    return text
+        except Exception:  # noqa: BLE001
+            continue
+    return ""
+
+
+def _fetch_html_playwright_page(url: str, timeout_ms: int = 90_000) -> tuple[str, str]:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         raise RuntimeError(
-            "Zillow blocked the simple download (HTTP 403). Install Playwright:\n"
+            "Install Playwright for Zillow URL import:\n"
             "  python3 -m pip install playwright\n"
             "  python3 -m playwright install chromium"
         ) from exc
 
+    load_env()
+    if _prefer_browser_fetch():
+        if os.environ.get("ZILLOW_AUTO_CDP", "").strip().lower() in ("1", "true", "yes"):
+            return _fetch_via_cdp(url, timeout_ms=timeout_ms)
+        return _fetch_via_visible_chrome(url, timeout_ms=timeout_ms)
+
+    headed = _playwright_headed()
+    profile = _playwright_profile_dir()
+    launch_kwargs: dict[str, Any] = {"channel": "chrome", "headless": not headed}
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        if profile is not None:
+            profile.mkdir(parents=True, exist_ok=True)
+            context = p.chromium.launch_persistent_context(
+                str(profile),
+                user_agent=_BROWSER_UA,
+                viewport={"width": 1280, "height": 900},
+                **launch_kwargs,
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            html, dom_description = _wait_for_zillow_listing(page, url)
+            context.close()
+            return html, dom_description
+        browser = p.chromium.launch(**launch_kwargs)
         page = browser.new_page(user_agent=_BROWSER_UA)
         page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-        page.wait_for_timeout(2500)
-        html = page.content()
+        html, dom_description = _wait_for_zillow_listing(page, url)
         browser.close()
+        return html, dom_description
+
+
+def _fetch_html_playwright(url: str, timeout_ms: int = 60_000) -> str:
+    html, _ = _fetch_html_playwright_page(url, timeout_ms=timeout_ms)
     return html
 
 
+def _listing_page_loaded(html: str) -> bool:
+    lower = html.lower()
+    if len(html) < 20_000:
+        return False
+    if "homedetails" not in lower and "zpid" not in lower:
+        return False
+    if re.search(r'"listPrice"\s*:\s*\d{4,}', html, re.IGNORECASE):
+        return True
+    if re.search(r'"price"\s*:\s*\d{4,}', html):
+        return True
+    if re.search(r"list\s*price\s*:\s*\$[\d,]+", html, re.IGNORECASE):
+        return True
+    return "__next_data__" in lower and len(html) > 100_000
+
+
 def _blocked_by_zillow(html: str) -> bool:
+    if _listing_page_loaded(html):
+        return False
     lower = html.lower()
     return (
         "px-captcha" in lower
         or "access to this page has been denied" in lower
-        or "perimeterx" in lower
+        or ("before you continue" in lower and "zillow" in lower)
     )
 
 
 def fetch_html(url: str) -> str:
+    html, _ = fetch_html_with_browser(url)
+    return html
+
+
+def _prefer_browser_fetch() -> bool:
+    if os.environ.get("ZILLOW_AUTO_CDP", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    if _playwright_profile_dir() is not None:
+        return True
+    return _playwright_headed()
+
+
+def _parsed_text_len(html: str, url: str) -> int:
+    return len(str(_parse_zillow_html(html, url).get("text") or ""))
+
+
+def fetch_html_with_browser(url: str) -> tuple[str, str]:
     load_env()
     html: str | None = None
-    try:
-        html = _fetch_html_urllib(url)
-    except urllib.error.HTTPError as exc:
-        if exc.code not in (403, 429):
-            raise RuntimeError(f"Could not fetch listing page (HTTP {exc.code}).") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Could not fetch listing page: {exc.reason}") from exc
+    dom_description = ""
+    if not _prefer_browser_fetch():
+        try:
+            html = _fetch_html_urllib(url)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (403, 429):
+                raise RuntimeError(f"Could not fetch listing page (HTTP {exc.code}).") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Could not fetch listing page: {exc.reason}") from exc
 
-    if html is None or _blocked_by_zillow(html):
-        html = _fetch_html_playwright(url)
+    needs_browser = (
+        html is None
+        or _blocked_by_zillow(html)
+        or _parsed_text_len(html, url) < 80
+    )
+    if needs_browser:
+        html, dom_description = _fetch_html_playwright_page(url)
 
-    if _blocked_by_zillow(html):
+    if not _listing_ready(html, url, dom_description):
         raise RuntimeError(
-            "Zillow blocked automated access (bot protection / captcha). "
-            "Open the listing in your normal browser, copy the description into Listing text, "
-            "and paste or upload 2–3 screenshots—or add this property to the ingest queue with "
-            "photo URLs like the other Zillow listings."
+            "Zillow listing did not load (verification or captcha). "
+            "Set ZILLOW_AUTO_CDP=true in .env, rerun the batch, and complete the check in Chrome. "
+            "Increase ZILLOW_CAPTCHA_WAIT_SEC if you need more time (default 300)."
         )
-    return html
+    return html, dom_description
 
 
 def _walk_find(obj: Any, keys: set[str]) -> Any:
@@ -110,7 +429,12 @@ def _walk_find(obj: Any, keys: set[str]) -> Any:
     return None
 
 
-def _parse_zillow_html(html: str, url: str) -> dict[str, Any]:
+def _parse_zillow_html(
+    html: str,
+    url: str,
+    *,
+    dom_description: str = "",
+) -> dict[str, Any]:
     photo_urls: list[str] = []
     for match in _ZILLOW_PHOTO_RE.finditer(html):
         u = match.group(0)
@@ -118,6 +442,7 @@ def _parse_zillow_html(html: str, url: str) -> dict[str, Any]:
             photo_urls.append(u)
 
     price: int | None = None
+    days_on_zillow: int | None = None
     for pat in (
         r'"price"\s*:\s*(\d{4,9})',
         r'"listPrice"\s*:\s*(\d{4,9})',
@@ -158,17 +483,42 @@ def _parse_zillow_html(html: str, url: str) -> dict[str, Any]:
                     price = int(raw_price)
                 elif isinstance(raw_price, str) and raw_price.isdigit():
                     price = int(raw_price)
+            raw_dom = _walk_find(
+                data,
+                {
+                    "timeOnZillow",
+                    "daysOnZillow",
+                    "daysOnSite",
+                    "timeOnSite",
+                    "daysOnMarket",
+                },
+            )
+            if isinstance(raw_dom, (int, float)) and raw_dom >= 0:
+                days_on_zillow = int(raw_dom)
+            elif isinstance(raw_dom, str):
+                dom_m = re.search(r"(\d+)", raw_dom)
+                if dom_m:
+                    days_on_zillow = int(dom_m.group(1))
         except json.JSONDecodeError:
             pass
+
+    if days_on_zillow is None:
+        dom_m = re.search(r"(\d+)\s+days?\s+on\s+Zillow", html, re.IGNORECASE)
+        if dom_m:
+            days_on_zillow = int(dom_m.group(1))
 
     if not description:
         m = re.search(r'"description"\s*:\s*"((?:\\.|[^"\\])*)"', html)
         if m:
             description = json.loads(f'"{m.group(1)}"')
+    if dom_description and len(dom_description) > len(description):
+        description = dom_description.strip()
 
     lines: list[str] = []
     if price:
         lines.append(f"List price: ${price:,}")
+    if days_on_zillow is not None:
+        lines.append(f"Days on Zillow: {days_on_zillow}")
     addr_m = re.search(
         r"(\d+\s+[\w\s]+),\s*([A-Za-z\s]+),\s*([A-Z]{2})\s*(\d{5})",
         url,
@@ -191,6 +541,7 @@ def _parse_zillow_html(html: str, url: str) -> dict[str, Any]:
         "photo_urls": photo_urls[:MAX_PHOTOS],
         "link": url,
         "price": price,
+        "days_on_zillow": days_on_zillow,
     }
 
 
@@ -216,9 +567,9 @@ def import_from_url(url: str) -> dict[str, Any]:
     if "zillow.com" not in url.lower():
         raise ValueError("Only Zillow homedetails URLs are supported for auto-import today.")
 
-    html = fetch_html(url)
-    parsed = _parse_zillow_html(html, url)
-    if not parsed.get("text"):
+    html, dom_description = fetch_html_with_browser(url)
+    parsed = _parse_zillow_html(html, url, dom_description=dom_description)
+    if len(str(parsed.get("text") or "")) < 80:
         raise RuntimeError(
             "Fetched the page but could not read listing text. Paste description manually "
             "or add screenshots."

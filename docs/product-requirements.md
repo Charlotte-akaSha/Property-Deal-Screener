@@ -87,7 +87,7 @@ What gets written on failure:
 - **Sidebar filters:** regions, price range, min match score, max commute, min bedrooms, recommendation verdicts
 - **KPI row:** count, avg match, best match, etc.
 - **Tabs:**
-  - **Compare** — HTML table with thumbnails, verdict pills, property detail dialog
+  - **Compare** — HTML table with thumbnails, verdict pills, property detail dialog. Neighbourhood badges open an evaluation against the rental and appreciation criteria.
   - **Map** — pydeck scatter; click for detail; geocode cache
   - **Charts** — Altair distributions and score breakdowns
   - **Head-to-head** — compare 2–4 properties side by side
