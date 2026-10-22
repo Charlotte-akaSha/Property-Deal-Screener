@@ -107,6 +107,77 @@ COMPARE_COLUMN_LIST = [
 ]
 UPDATABLE_COUNT = HEADERS.index("Wow Factor")
 
+_SCORE_HEADER_SET = frozenset(
+    {
+        "Financial",
+        "Location",
+        "Property",
+        "Appreciation",
+        "Rental",
+        "Management",
+        "Lifestyle",
+        "Climate",
+        "Risk",
+    }
+)
+
+
+def _coerce_cell(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _sheet_cell(value: object) -> str | int | float:
+    """Google Sheets must receive \"\" for empty cells — None leaves stale values."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value == int(value):
+        return int(value)
+    return value
+
+
+def _score_values(row: list[Any]) -> set[float]:
+    scores: set[float] = set()
+    for header in _SCORE_HEADER_SET:
+        if header not in HEADERS:
+            continue
+        raw = row[HEADERS.index(header)]
+        try:
+            scores.add(float(raw))
+        except (TypeError, ValueError):
+            continue
+    return scores
+
+
+def _keep_personal_cell(header: str, old: object, new_row: list[Any]) -> bool:
+    """Keep sheet personal cells unless they look like misaligned category scores."""
+    old_s = _coerce_cell(old)
+    if not old_s:
+        return False
+    if header == "Wow Factor":
+        try:
+            wow = float(old_s)
+        except ValueError:
+            return True
+        if not 0 <= wow <= 10:
+            return False
+        return wow not in _score_values(new_row)
+    if header == "Notes":
+        return not old_s.isdigit()
+    return True
+
+
+def _merge_personal_from_sheet(new_row: list[Any], existing: list[Any]) -> list[Any]:
+    merged = list(new_row)
+    for i, header in enumerate(HEADERS):
+        if header not in PERSONAL_COLUMN_LIST:
+            continue
+        old = existing[i] if i < len(existing) else ""
+        if _keep_personal_cell(header, old, new_row):
+            merged[i] = old
+    return merged
+
 
 def _service_account_path() -> Path:
     load_env()
@@ -268,7 +339,7 @@ def analysis_to_row(analysis: dict[str, Any]) -> list[Any]:
         "Judgment reason": "",
         **_compare_fields(e, s, t),
     }
-    return [by_header[h] for h in HEADERS]
+    return [_sheet_cell(by_header[h]) for h in HEADERS]
 
 
 def _band_high_medium_low(score: object) -> str:
@@ -405,24 +476,14 @@ def upsert_analysis(analysis: dict[str, Any], sheet_tab: str | None = None) -> d
             "sheet_tab": ws.title,
             "sheet_url": sheet_url(),
         }
-    # Update non-personal columns; leave Wow Factor / Notes / Visit Date / Final Decision untouched.
-    prefix = row[:UPDATABLE_COUNT]
-    end_col = gspread.utils.rowcol_to_a1(1, UPDATABLE_COUNT).replace("1", "")
+    existing_values = ws.row_values(existing)
+    merged = [_sheet_cell(v) for v in _merge_personal_from_sheet(row, existing_values)]
+    end_cell = gspread.utils.rowcol_to_a1(existing, len(HEADERS))
     ws.update(
-        range_name=f"A{existing}:{end_col}{existing}",
-        values=[prefix],
+        range_name=f"A{existing}:{end_cell}",
+        values=[merged],
         value_input_option="USER_ENTERED",
     )
-    tail_start = HEADERS.index(COMPARE_COLUMN_LIST[0]) + 1
-    tail = row[tail_start - 1 :]
-    if tail:
-        start_cell = gspread.utils.rowcol_to_a1(existing, tail_start)
-        end_cell = gspread.utils.rowcol_to_a1(existing, len(HEADERS))
-        ws.update(
-            range_name=f"{start_cell}:{end_cell}",
-            values=[tail],
-            value_input_option="USER_ENTERED",
-        )
     return {
         "action": "update",
         "property_id": property_id,
