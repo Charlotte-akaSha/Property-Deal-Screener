@@ -413,6 +413,112 @@ def fetch_html_with_browser(url: str) -> tuple[str, str]:
     return html, dom_description
 
 
+def _agent_from_mapping(agent: dict[str, Any]) -> dict[str, str]:
+    name = str(
+        agent.get("name")
+        or agent.get("memberFullName")
+        or agent.get("displayName")
+        or ""
+    ).strip()
+    phone = str(
+        agent.get("phone")
+        or agent.get("phoneNumber")
+        or agent.get("businessPhone")
+        or ""
+    ).strip()
+    company = str(
+        agent.get("businessName")
+        or agent.get("brokerageName")
+        or agent.get("company")
+        or ""
+    ).strip()
+    return {
+        "listing_agent_name": name,
+        "listing_agent_phone": phone,
+        "listing_agent_company": company,
+    }
+
+
+def _walk_listing_agent(obj: Any) -> dict[str, str] | None:
+    if isinstance(obj, dict):
+        for key in ("listingAgent", "listing_agent", "attributionAgent", "listingAgents"):
+            candidate = obj.get(key)
+            if isinstance(candidate, dict):
+                parsed = _agent_from_mapping(candidate)
+                if any(parsed.values()):
+                    return parsed
+            if isinstance(candidate, list):
+                for item in candidate:
+                    if isinstance(item, dict):
+                        parsed = _agent_from_mapping(item)
+                        if any(parsed.values()):
+                            return parsed
+        for value in obj.values():
+            found = _walk_listing_agent(value)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _walk_listing_agent(item)
+            if found:
+                return found
+    return None
+
+
+def _parse_zillow_agent(html: str) -> dict[str, str]:
+    empty = {
+        "listing_agent_name": "",
+        "listing_agent_phone": "",
+        "listing_agent_company": "",
+    }
+    m = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+        html,
+        flags=re.DOTALL,
+    )
+    if m:
+        try:
+            data = json.loads(m.group(1))
+            found = _walk_listing_agent(data)
+            if found:
+                return {**empty, **found}
+        except json.JSONDecodeError:
+            pass
+    name_m = re.search(
+        r'"listingAgentName"\s*:\s*"((?:\\.|[^"\\])*)"',
+        html,
+    )
+    phone_m = re.search(
+        r'"listingAgentPhone(?:Number)?"\s*:\s*"((?:\\.|[^"\\])*)"',
+        html,
+    )
+    if name_m or phone_m:
+        out = dict(empty)
+        if name_m:
+            out["listing_agent_name"] = json.loads(f'"{name_m.group(1)}"').strip()
+        if phone_m:
+            out["listing_agent_phone"] = json.loads(f'"{phone_m.group(1)}"').strip()
+        return out
+    tel_m = re.search(r'href="tel:([^"]+)"', html)
+    if tel_m:
+        empty["listing_agent_phone"] = tel_m.group(1).strip()
+    return empty
+
+
+def merge_agent_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
+    """Fill missing agent keys on extracted dict from Zillow import."""
+    for key in ("listing_agent_name", "listing_agent_phone", "listing_agent_company"):
+        if not str(target.get(key) or "").strip():
+            val = str(source.get(key) or "").strip()
+            if val:
+                target[key] = val
+
+
+def listing_agent_from_url(url: str) -> dict[str, str]:
+    html, _ = fetch_html_with_browser(url)
+    return _parse_zillow_agent(html)
+
+
 def _walk_find(obj: Any, keys: set[str]) -> Any:
     if isinstance(obj, dict):
         for k, v in obj.items():
@@ -536,12 +642,14 @@ def _parse_zillow_html(
         lines.append(description)
 
     text = "\n".join(lines).strip() or description
+    agent = _parse_zillow_agent(html)
     return {
         "text": text,
         "photo_urls": photo_urls[:MAX_PHOTOS],
         "link": url,
         "price": price,
         "days_on_zillow": days_on_zillow,
+        **agent,
     }
 
 
@@ -581,6 +689,10 @@ def import_from_url(url: str) -> dict[str, Any]:
         "photo_urls": parsed.get("photo_urls") or [],
         "photos": photos,
         "price": parsed.get("price"),
+        "days_on_zillow": parsed.get("days_on_zillow"),
+        "listing_agent_name": parsed.get("listing_agent_name") or "",
+        "listing_agent_phone": parsed.get("listing_agent_phone") or "",
+        "listing_agent_company": parsed.get("listing_agent_company") or "",
     }
 
 

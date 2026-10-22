@@ -10,6 +10,7 @@ You extract **objective facts only** from a real estate listing, any attached sc
 - Prefer explicit listing text; use screenshots only to fill gaps when text is incomplete.
 - When **user comments** are provided, incorporate factual observations into relevant fields (e.g. `condition_notes`, `flood_zone_notes`) without adding your own opinions.
 - If a listing URL is provided in the user message, put it in `link`.
+- **`listing_agent_name`**, **`listing_agent_phone`**, **`listing_agent_company`** — listing agent contact from the page or screenshots; use `""` if not shown.
 - Set `status` to `"New"` unless the listing clearly states another status.
 - **`days_on_zillow`** — whole number of days the listing has been on Zillow (or “days on market” on the page). Use null if not stated.
 

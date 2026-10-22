@@ -25,6 +25,8 @@ from write_to_sheets import (
     HEADERS,
     PERSONAL_COLUMN_LIST,
     PERSONAL_SHEET_BLOCK,
+    _listing_agent_cell,
+    ensure_headers,
     open_worksheet,
 )
 
@@ -613,6 +615,54 @@ def save_personal_note(row: pd.Series, notes: str) -> tuple[int, list[str]]:
     )
 
 
+def property_id_for_link_substring(ws, needle: str) -> str | None:
+    """Find Property ID whose Link column contains needle (e.g. Zillow zpid)."""
+    if not needle:
+        return None
+    link_col = HEADERS.index("Link") + 1
+    ids = ws.col_values(1)
+    links = ws.col_values(link_col)
+    for pid, link in zip(ids[1:], links[1:], strict=False):
+        if needle in str(link or ""):
+            return str(pid).strip() or None
+    return None
+
+
+def save_listing_agent_fields(
+    property_id: str,
+    region: str,
+    *,
+    name: str = "",
+    company: str = "",
+    phone: str = "",
+) -> None:
+    ws = open_worksheet(region)
+    ensure_headers(ws)
+    sheet_row = resolve_unique_sheet_row(ws, property_id)
+    agent_col = HEADERS.index("Listing agent") + 1
+    phone_col = HEADERS.index("Agent phone") + 1
+    listing_agent = _listing_agent_cell(
+        {
+            "listing_agent_name": name,
+            "listing_agent_company": company,
+            "listing_agent_phone": phone,
+        }
+    )
+    ws.batch_update(
+        [
+            {
+                "range": f"{_col_letter(agent_col)}{sheet_row}",
+                "values": [[listing_agent]],
+            },
+            {
+                "range": f"{_col_letter(phone_col)}{sheet_row}",
+                "values": [[phone.strip()]],
+            },
+        ],
+        value_input_option="USER_ENTERED",
+    )
+
+
 def save_personal_edits(edits: pd.DataFrame) -> tuple[int, list[str]]:
     """Write personal columns only. Returns (rows updated, error messages)."""
     if edits.empty:
@@ -628,6 +678,7 @@ def save_personal_edits(edits: pd.DataFrame) -> tuple[int, list[str]]:
     errors: list[str] = []
     for region, group in edits.groupby("Region", sort=False):
         ws = open_worksheet(str(region))
+        ensure_headers(ws)
         row_map = property_id_row_map(ws)
         batch: list[dict[str, Any]] = []
         rows_ok = 0

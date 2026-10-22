@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 import urllib.parse
 from collections.abc import Callable
 from typing import Any
@@ -17,6 +18,7 @@ from ui_helpers import format_currency, property_title_html
 
 COMPARE_TABLE_HEADERS: list[tuple[str, str]] = [
     ("Property", "property"),
+    ("Agent", "agent"),
     ("Neighbourhood", "location"),
     ("Price", "price"),
     ("Days on Zillow", "days_on_zillow"),
@@ -42,8 +44,9 @@ COMPARE_TABLE_HEADERS: list[tuple[str, str]] = [
 VISIT_TABLE_HEADERS: list[tuple[str, str]] = [
     ("Visit", "_visit"),
     ("Property", "property"),
+    ("Agent", "agent"),
     ("Contact", "_contact"),
-    *COMPARE_TABLE_HEADERS[2:],
+    *COMPARE_TABLE_HEADERS[3:],
 ]
 
 _VERDICT_ORDER = {
@@ -449,6 +452,23 @@ def _judgment_cell(
     )
 
 
+def _agent_cell(name: object, phone: object) -> str:
+    name_s = str(name or "").strip()
+    phone_s = str(phone or "").strip()
+    if not name_s and not phone_s:
+        return "<div class='pc-cell pc-contact-empty'>—</div>"
+    bits: list[str] = []
+    if name_s:
+        bits.append(f"<div class='pc-cell'>{html.escape(name_s)}</div>")
+    if phone_s:
+        tel = re.sub(r"[^\d+]", "", phone_s) or phone_s
+        bits.append(
+            f"<div class='pc-prop-sub'><a href='tel:{html.escape(tel)}'>"
+            f"{html.escape(phone_s)}</a></div>"
+        )
+    return "".join(bits)
+
+
 def _contact_cell(pid: str, phone: str, contact_href: Callable[[str], str]) -> str:
     label = phone.strip() if phone.strip() else "Add number"
     href = html.escape(contact_href(pid))
@@ -535,6 +555,7 @@ def build_row_cells(
 
     data_cells: dict[str, str] = {
         "property": sticky_prop,
+        "agent": _agent_cell(row.get("Listing agent"), row.get("Agent phone")),
         "location": f"<div class='pc-cell pc-cell-hood-clip'>{hood_html}</div>",
         "price": f"<div class='pc-cell-strong'>${html.escape(num(row.get('Price')))}</div>",
         "days_on_zillow": f"<div class='pc-cell'>{_days_on_zillow_label(row.get('Days on Zillow'))}</div>",

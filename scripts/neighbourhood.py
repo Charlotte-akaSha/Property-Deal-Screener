@@ -53,6 +53,44 @@ def zip_from_listing_url(url: object) -> str:
     return match.group(1) if match else ""
 
 
+_RESEARCH_PROSE_MARKERS = (
+    "the rental market",
+    "rental demand",
+    "typically attracts",
+    "primarily driven",
+    "tenant base",
+    "gross annual income",
+)
+
+
+def _looks_like_research_prose(text: str) -> bool:
+    cleaned = _clean(text)
+    if not cleaned:
+        return False
+    if len(cleaned) > 72:
+        return True
+    lower = cleaned.lower()
+    return any(marker in lower for marker in _RESEARCH_PROSE_MARKERS)
+
+
+def _short_name_from_prose(text: str) -> str:
+    body = _clean(text)
+    patterns = (
+        r"[Tt]he rental market in ([^,.]+)",
+        r"[Rr]ental demand (?:for this[^,]*|on this block[^,]*) (?:in|near) ([^,.]+)",
+        r"in the ([^,.]+?) (?:neighborhood|neighbourhood|area)\b",
+        r"in ([A-Z][A-Za-z\s\-']+?), (?:a |an |OH|the)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, body)
+        if not match:
+            continue
+        candidate = _clean(match.group(1))
+        if candidate and not _is_generic(candidate) and not _looks_like_research_prose(candidate):
+            return candidate
+    return ""
+
+
 def infer_from_research(text: object) -> str:
     """Pull a neighbourhood name from market-research prose when the short field is empty."""
     body = str(text or "").strip()
@@ -100,7 +138,12 @@ def resolve_neighbourhood_name(
     """
     direct = _clean(str(neighbourhood_name or ""))
     if direct and not _is_generic(direct):
-        return direct
+        if _looks_like_research_prose(direct):
+            short = _short_name_from_prose(direct)
+            if short:
+                return short
+        else:
+            return direct
 
     from_research = infer_from_research(neighbourhood_research)
     if from_research:

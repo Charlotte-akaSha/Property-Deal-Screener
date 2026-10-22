@@ -1198,12 +1198,6 @@ with st.sidebar:
     max_commute: float | None = float(max_commute_val) if max_commute_val < 180 else None
     min_beds = st.slider("Minimum bedrooms", 0, 6, 0)
 
-    st.caption("Verdict")
-    rec_selected: list[str] = []
-    for rec in RECOMMENDATIONS:
-        if st.checkbox(rec, value=True, key=f"verdict_{rec}"):
-            rec_selected.append(rec)
-
     hide_rejected = st.checkbox(
         "Hide rejected listings",
         value=False,
@@ -1213,8 +1207,6 @@ with st.sidebar:
 
     st.space("small")
     if st.button("Reset filters", icon=":material/restart_alt:", width="stretch"):
-        for rec in RECOMMENDATIONS:
-            st.session_state[f"verdict_{rec}"] = True
         st.rerun()
     st.link_button(
         "Open Google Sheets", sheet_url(),
@@ -1230,7 +1222,7 @@ with st.sidebar:
 filtered = apply_filters(
     scope,
     regions=[],
-    recommendations=rec_selected,
+    recommendations=[],
     price_range=(price_min, price_max),
     min_overall=min_overall,
     max_commute=max_commute,

@@ -26,6 +26,8 @@ SCOPES = [
 HEADERS = [
     "Property ID",
     "Link",
+    "Listing agent",
+    "Agent phone",
     "City",
     "State",
     "Overall",
@@ -182,6 +184,14 @@ def sheet_url() -> str:
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
 
 
+def _listing_agent_cell(extracted: dict[str, Any]) -> str:
+    name = str(extracted.get("listing_agent_name") or "").strip()
+    company = str(extracted.get("listing_agent_company") or "").strip()
+    if name and company:
+        return f"{name} — {company}"
+    return name or company
+
+
 def analysis_to_row(analysis: dict[str, Any]) -> list[Any]:
     e = analysis["extracted"]
     s = analysis["scored"]
@@ -202,6 +212,8 @@ def analysis_to_row(analysis: dict[str, Any]) -> list[Any]:
     by_header: dict[str, Any] = {
         "Property ID": analysis["meta"]["property_id"],
         "Link": e.get("link", ""),
+        "Listing agent": _listing_agent_cell(e),
+        "Agent phone": str(e.get("listing_agent_phone") or "").strip(),
         "City": e.get("city", ""),
         "State": e.get("state", ""),
         "Overall": s.get("overall"),

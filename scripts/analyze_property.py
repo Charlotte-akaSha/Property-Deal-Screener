@@ -98,6 +98,17 @@ def extract_facts(
     return normalize_rent_fields(extracted)
 
 
+def _merge_zillow_agent(extracted: dict[str, Any], link: str) -> None:
+    if not link or "zillow.com" not in link.lower():
+        return
+    try:
+        from listing_from_url import listing_agent_from_url, merge_agent_fields
+
+        merge_agent_fields(extracted, listing_agent_from_url(link))
+    except Exception:
+        return
+
+
 def score_property(
     extracted: dict[str, Any],
     transit: dict[str, Any] | None = None,
@@ -251,6 +262,7 @@ def analyze_from_memory(
         user_comments=comments,
         image_uploads=image_uploads or [],
     )
+    _merge_zillow_agent(extracted, link)
     regions = list_regions()
     sheet_tab = resolve_sheet_tab(
         extracted,
